@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   ArrowLeft,
   FolderOpen,
@@ -6,10 +6,10 @@ import {
   RefreshCw,
   Settings,
   Shield,
-  Square,
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { useQuotaGuardState } from "@/features/quota-guard/hooks/useQuotaGuardState";
 import { quotaGuardPhaseLabel } from "@/features/quota-guard/quotaGuardViewModel";
 import {
@@ -30,6 +30,24 @@ import type {
 type AsyncAction = "load" | "save" | "refresh" | "workspace" | null;
 type Screen = "monitor" | "settings";
 type Appearance = "light" | "dark";
+type WindowMode = "compact" | "mini" | "pill";
+
+const APPEARANCE_KEY = "codex-usage-limiter.appearance";
+const WINDOW_MODE_KEY = "codex-usage-limiter.windowMode";
+const ALWAYS_ON_TOP_KEY = "codex-usage-limiter.alwaysOnTop";
+
+const MODE_WINDOWS: Record<WindowMode, { width: number; height: number; minWidth: number; minHeight: number; resizable: boolean }> = {
+  compact: { width: 420, height: 240, minWidth: 380, minHeight: 220, resizable: true },
+  mini: { width: 320, height: 168, minWidth: 320, minHeight: 168, resizable: false },
+  pill: { width: 280, height: 72, minWidth: 280, minHeight: 72, resizable: false },
+};
+const SETTINGS_WINDOW = { width: 420, height: 500, minWidth: 420, minHeight: 500, resizable: false };
+
+const windowModeOptions: Array<{ value: WindowMode; label: string; dims: string }> = [
+  { value: "compact", label: "Compact", dims: "420 × 240" },
+  { value: "mini", label: "Mini", dims: "320 × 168" },
+  { value: "pill", label: "Pill", dims: "280 × 72" },
+];
 
 const responseOptions: Array<{
   value: QuotaAction;
@@ -61,6 +79,10 @@ function clampPercent(value: number | undefined | null) {
   return Math.min(100, Math.max(0, Number.isFinite(value) ? Number(value) : 0));
 }
 
+function clampThreshold(value: number) {
+  return Math.max(1, Math.round(clampPercent(value)));
+}
+
 function formatReset(timestamp: number | null | undefined) {
   if (!timestamp) return "Reset time unavailable";
   const remainingMinutes = Math.max(0, Math.ceil((timestamp * 1000 - Date.now()) / 60_000));
@@ -68,6 +90,15 @@ function formatReset(timestamp: number | null | undefined) {
   const hours = Math.floor(remainingMinutes / 60);
   const minutes = remainingMinutes % 60;
   return hours > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${minutes}m`;
+}
+
+function formatResetShort(timestamp: number | null | undefined) {
+  if (!timestamp) return "no reset data";
+  const remainingMinutes = Math.max(0, Math.ceil((timestamp * 1000 - Date.now()) / 60_000));
+  if (remainingMinutes === 0) return "reset pending";
+  const hours = Math.floor(remainingMinutes / 60);
+  const minutes = remainingMinutes % 60;
+  return hours > 0 ? `resets ${hours}h ${minutes}m` : `resets ${minutes}m`;
 }
 
 function moreUsedWindow(
@@ -81,6 +112,11 @@ function moreUsedWindow(
     : secondary;
 }
 
+function loadWindowMode(): WindowMode {
+  const stored = localStorage.getItem(WINDOW_MODE_KEY);
+  return stored === "mini" || stored === "pill" ? stored : "compact";
+}
+
 export function UsageLimiterApp() {
   const quotaGuard = useQuotaGuardState();
   const [screen, setScreen] = useState<Screen>("monitor");
@@ -91,9 +127,17 @@ export function UsageLimiterApp() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [appearance, setAppearance] = useState<Appearance>(() =>
-    localStorage.getItem("codex-usage-limiter.appearance") === "dark" ? "dark" : "light",
+    localStorage.getItem(APPEARANCE_KEY) === "dark" ? "dark" : "light",
+  );
+  const [windowMode, setWindowMode] = useState<WindowMode>(loadWindowMode);
+  const [alwaysOnTop, setAlwaysOnTop] = useState<boolean>(() =>
+    localStorage.getItem(ALWAYS_ON_TOP_KEY) === "true",
   );
   const [draftAppearance, setDraftAppearance] = useState<Appearance>(appearance);
+  const [draftWindowMode, setDraftWindowMode] = useState<WindowMode>(windowMode);
+  const [draftAlwaysOnTop, setDraftAlwaysOnTop] = useState<boolean>(alwaysOnTop);
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const dragValue = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     setBusy("load");
@@ -116,8 +160,31 @@ export function UsageLimiterApp() {
 
   useEffect(() => {
     document.documentElement.dataset.appearance = appearance;
-    localStorage.setItem("codex-usage-limiter.appearance", appearance);
+    localStorage.setItem(APPEARANCE_KEY, appearance);
   }, [appearance]);
+
+  useEffect(() => {
+    localStorage.setItem(WINDOW_MODE_KEY, windowMode);
+  }, [windowMode]);
+
+  useEffect(() => {
+    localStorage.setItem(ALWAYS_ON_TOP_KEY, String(alwaysOnTop));
+  }, [alwaysOnTop]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const target = screen === "settings" ? SETTINGS_WINDOW : MODE_WINDOWS[windowMode];
+        await appWindow.setResizable(screen === "monitor" && target.resizable);
+        await appWindow.setMinSize(new LogicalSize(target.minWidth, target.minHeight));
+        await appWindow.setSize(new LogicalSize(target.width, target.height));
+        await appWindow.setAlwaysOnTop(alwaysOnTop);
+      } catch {
+        // window API unavailable (e.g. tests) — layout still renders
+      }
+    })();
+  }, [screen, windowMode, alwaysOnTop]);
 
   const persistDraft = useCallback(async (nextDraft: QuotaGuardSettings) => {
     if (!settings) return false;
@@ -145,7 +212,7 @@ export function UsageLimiterApp() {
   }, [persistDraft, settings]);
 
   const setDraftThreshold = useCallback((value: number) => {
-    const threshold = Math.max(1, Math.round(clampPercent(value)));
+    const threshold = clampThreshold(value);
     setDraft((current) => current ? {
       ...current,
       primaryThresholdPercent: threshold,
@@ -202,11 +269,10 @@ export function UsageLimiterApp() {
     [quotaGuard.state?.snapshot?.primary, quotaGuard.state?.snapshot?.secondary],
   );
   const used = clampPercent(activeWindow?.usedPercent);
-  const progressStyle = { "--progress": `${used}%` } as CSSProperties;
   const threshold = draft
     ? Math.min(draft.primaryThresholdPercent, draft.secondaryThresholdPercent)
     : 90;
-  const markerStyle = { "--threshold": `${threshold}%` } as CSSProperties;
+  const barStyle = { "--progress": `${used}%`, "--threshold": `${threshold}%` } as CSSProperties;
   const currentAction = responseOptions.find((option) => option.value === draft?.action)
     ?? responseOptions[0];
   const phaseLabel = quotaGuard.state
@@ -217,13 +283,59 @@ export function UsageLimiterApp() {
     : quotaGuard.state?.phase === "monitoring" || quotaGuard.state?.phase === "ready"
       ? "healthy"
       : "neutral";
-  const workspaceLabel = workspaces.length > 0
-    ? `${workspaces[0]?.name || "Codex workspace"} connected`
-    : "No Codex workspace";
+  const snapshotStale = Boolean(activeWindow) && quotaGuard.state?.snapshotFresh === false;
+
+  const thresholdFromPointer = useCallback((clientX: number) => {
+    const rect = barRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return null;
+    return clampThreshold(((clientX - rect.left) / rect.width) * 100);
+  }, []);
+
+  const persistThreshold = useCallback((value: number) => {
+    if (!settings) return;
+    if (settings.quotaGuard.primaryThresholdPercent === value
+      && settings.quotaGuard.secondaryThresholdPercent === value) {
+      setDraftThreshold(value);
+      return;
+    }
+    persistPatch({ primaryThresholdPercent: value, secondaryThresholdPercent: value });
+  }, [persistPatch, setDraftThreshold, settings]);
+
+  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (busy === "save") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragValue.current = threshold;
+  }, [busy, threshold]);
+
+  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (dragValue.current === null) return;
+    const next = thresholdFromPointer(event.clientX);
+    if (next !== null && next !== dragValue.current) {
+      dragValue.current = next;
+      setDraftThreshold(next);
+    }
+  }, [setDraftThreshold, thresholdFromPointer]);
+
+  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (dragValue.current === null) return;
+    const next = thresholdFromPointer(event.clientX) ?? dragValue.current;
+    dragValue.current = null;
+    persistThreshold(next);
+  }, [persistThreshold, thresholdFromPointer]);
+
+  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    const delta = event.key === "ArrowRight" || event.key === "ArrowUp"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowDown" ? -1 : 0;
+    if (delta === 0) return;
+    event.preventDefault();
+    if (busy === "save") return;
+    persistThreshold(clampThreshold(threshold + delta));
+  }, [busy, persistThreshold, threshold]);
 
   if (!draft || !settings) {
     return (
-      <main className="limiter-window limiter-window--loading">
+      <main className="limiter-window limiter-window--loading" data-mode={windowMode}>
         <RefreshCw className="limiter-spin" size={20} />
         <span>{error ?? "Loading Codex usage…"}</span>
         {error ? <button onClick={() => void load()}>Try again</button> : null}
@@ -235,6 +347,8 @@ export function UsageLimiterApp() {
   const openSettings = () => {
     setDraft(settings.quotaGuard);
     setDraftAppearance(appearance);
+    setDraftWindowMode(windowMode);
+    setDraftAlwaysOnTop(alwaysOnTop);
     setError(null);
     setNotice(null);
     setScreen("settings");
@@ -242,6 +356,8 @@ export function UsageLimiterApp() {
   const cancelSettings = () => {
     setDraft(settings.quotaGuard);
     setDraftAppearance(appearance);
+    setDraftWindowMode(windowMode);
+    setDraftAlwaysOnTop(alwaysOnTop);
     setError(null);
     setScreen("monitor");
   };
@@ -249,123 +365,198 @@ export function UsageLimiterApp() {
     const saved = await persistDraft(draft);
     if (!saved) return;
     setAppearance(draftAppearance);
+    setWindowMode(draftWindowMode);
+    setAlwaysOnTop(draftAlwaysOnTop);
     setNotice("Settings saved.");
     setScreen("monitor");
   };
 
+  const enabledSwitch = (persistImmediately: boolean) => (
+    <label className="limiter-enabled-control">
+      <span className="sr-only">{draft.enabled ? "Enabled" : "Disabled"}</span>
+      <span className="reference-switch">
+        <input
+          type="checkbox"
+          checked={draft.enabled}
+          disabled={busy === "save"}
+          onChange={(event) => persistImmediately
+            ? persistPatch({ enabled: event.target.checked })
+            : setDraft({ ...draft, enabled: event.target.checked })}
+          aria-label={draft.enabled ? "Limiter enabled" : "Limiter disabled"}
+        />
+        <span aria-hidden="true" />
+      </span>
+    </label>
+  );
+
+  const usageBar = (
+    <div
+      className="limiter-progress"
+      ref={barRef}
+      style={barStyle}
+      role="progressbar"
+      aria-label="Current Codex usage"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(used)}
+    >
+      <span className={`limiter-progress__fill${used >= threshold ? " is-over" : ""}`} />
+      <span
+        className="limiter-progress__handle"
+        role="slider"
+        tabIndex={0}
+        aria-label="Usage threshold"
+        aria-valuemin={1}
+        aria-valuemax={100}
+        aria-valuenow={threshold}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onKeyDown={handleKeyDown}
+      >
+        <span className="limiter-progress__knob" aria-hidden="true" />
+        <small aria-hidden="true">{threshold}%</small>
+      </span>
+    </div>
+  );
+
+  const usageValueClass = `limiter-usage__value${snapshotStale ? " is-stale" : ""}`;
+  const resetText = activeWindow
+    ? snapshotStale
+      ? "Stale reading — refresh for current usage"
+      : formatReset(activeWindow.resetsAt)
+    : "No usage reading yet";
+  const shortResetText = activeWindow
+    ? snapshotStale ? "stale reading" : formatResetShort(activeWindow.resetsAt)
+    : "no data yet";
+
+  const showTitlebar = screen === "settings" || windowMode !== "pill";
+
   return (
-    <main className="limiter-window">
-      <header className="limiter-titlebar" data-tauri-drag-region onDoubleClick={() => void appWindow().toggleMaximize()}>
-        <div className="limiter-titlebar__brand" data-tauri-drag-region>
-          {screen === "monitor" ? (
-            <>
-              <Shield aria-hidden="true" />
-              <span data-tauri-drag-region>Codex Usage Limiter</span>
-            </>
-          ) : (
-            <>
-              <button type="button" className="limiter-back" aria-label="Back to usage" onClick={cancelSettings}>
-                <ArrowLeft />
-              </button>
-              <span data-tauri-drag-region>Settings</span>
-            </>
-          )}
-        </div>
-        <div className="limiter-titlebar__actions">
-          {screen === "monitor" ? (
-            <button type="button" aria-label="Open settings" onClick={openSettings}><Settings /></button>
-          ) : null}
-          <button type="button" aria-label="Minimize window" onClick={() => void appWindow().minimize()}><Minus /></button>
-          {screen === "monitor" ? (
-            <button type="button" aria-label="Maximize window" onClick={() => void appWindow().toggleMaximize()}><Square /></button>
-          ) : null}
-          <button type="button" aria-label="Close window" onClick={() => void appWindow().close()}><X /></button>
-        </div>
-      </header>
+    <main className="limiter-window" data-mode={windowMode} data-screen={screen}>
+      {showTitlebar ? (
+        <header className="limiter-titlebar" data-tauri-drag-region>
+          <div className="limiter-titlebar__brand" data-tauri-drag-region>
+            {screen === "monitor" ? (
+              <>
+                <Shield aria-hidden="true" />
+                <span data-tauri-drag-region>
+                  {windowMode === "mini" ? "Codex Usage" : "Codex Usage Limiter"}
+                </span>
+              </>
+            ) : (
+              <>
+                <button type="button" className="limiter-back" aria-label="Back to usage" onClick={cancelSettings}>
+                  <ArrowLeft />
+                </button>
+                <span data-tauri-drag-region>Settings</span>
+              </>
+            )}
+          </div>
+          <div className="limiter-titlebar__actions">
+            {screen === "monitor" ? (
+              <button type="button" aria-label="Open settings" onClick={openSettings}><Settings /></button>
+            ) : null}
+            <button type="button" aria-label="Minimize window" onClick={() => void appWindow().minimize()}><Minus /></button>
+            <button type="button" aria-label="Close window" onClick={() => void appWindow().close()}><X /></button>
+          </div>
+        </header>
+      ) : null}
 
       {screen === "monitor" ? (
         <div className="limiter-page limiter-monitor-page">
-          <section className="limiter-status-row" aria-label="Limiter status">
-            <div className={`limiter-status limiter-status--${statusTone}`}>
-              <span aria-hidden="true" />
-              <strong>{phaseLabel}</strong>
-            </div>
-            <label className="limiter-enabled-control">
-              <span>{draft.enabled ? "Enabled" : "Disabled"}</span>
-              <span className="reference-switch">
-                <input
-                  type="checkbox"
-                  checked={draft.enabled}
-                  disabled={busy === "save"}
-                  onChange={(event) => persistPatch({ enabled: event.target.checked })}
-                  aria-label={draft.enabled ? "Limiter enabled" : "Limiter disabled"}
-                />
-                <span aria-hidden="true" />
-              </span>
-            </label>
-          </section>
+          <h1 className="sr-only">Current usage</h1>
 
-          <section className="limiter-usage" aria-label="Current usage">
-            <h1>Current usage</h1>
-            <strong className={`limiter-usage__value${activeWindow && quotaGuard.state?.snapshotFresh === false ? " is-stale" : ""}`}>
-              {Math.round(used)}%
-            </strong>
-            <p>
-              {activeWindow
-                ? quotaGuard.state?.snapshotFresh === false
-                  ? "Stale reading — refresh for current usage"
-                  : formatReset(activeWindow.resetsAt)
-                : "No usage reading yet"}
-            </p>
-            <div
-              className="limiter-progress"
-              style={{ ...progressStyle, ...markerStyle }}
-              role="progressbar"
-              aria-label="Current Codex usage"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(used)}
-            >
-              <span className="limiter-progress__fill" />
-              <span className="limiter-progress__marker" aria-hidden="true"><small>{threshold}%</small></span>
-            </div>
-          </section>
+          {windowMode === "compact" ? (
+            <>
+              <div className="limiter-compact-top">
+                <strong className={usageValueClass}>{Math.round(used)}%</strong>
+                <div className="limiter-compact-meta">
+                  <div className="limiter-compact-meta__row">
+                    <span className={`limiter-status limiter-status--${statusTone}`}>
+                      <span aria-hidden="true" />
+                      <strong>{phaseLabel}</strong>
+                    </span>
+                    {enabledSwitch(true)}
+                  </div>
+                  <p className="limiter-reset-caption">{resetText}</p>
+                </div>
+              </div>
+              {usageBar}
+              <div className="limiter-action-row">
+                <span>At {threshold}%</span>
+                <label>
+                  <span className="sr-only">When limit is reached</span>
+                  <select
+                    aria-label="When limit is reached"
+                    value={draft.action}
+                    disabled={busy === "save"}
+                    onChange={(event) => persistPatch({ action: event.target.value as QuotaAction })}
+                  >
+                    {responseOptions.map((option) => (
+                      <option value={option.value} key={option.value}>{option.title}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <footer className="limiter-compact-footer">
+                <span className="limiter-last-checked">
+                  {quotaGuard.state?.snapshotFresh ? "Last checked just now" : "Waiting for update"}
+                </span>
+                {workspaces.length === 0 ? (
+                  <button type="button" onClick={() => void connectWorkspace()} disabled={busy !== null}>
+                    <FolderOpen /> Connect
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => void refreshUsage()} disabled={busy !== null || !draft.enabled}>
+                    <RefreshCw className={busy === "refresh" ? "limiter-spin" : ""} /> Refresh
+                  </button>
+                )}
+              </footer>
+            </>
+          ) : null}
 
-          <section className="limiter-response-row" aria-label="Usage response">
-            <span>At {threshold}%</span>
-            <label>
-              <span className="sr-only">When limit is reached</span>
-              <select
-                aria-label="When limit is reached"
-                value={draft.action}
-                disabled={busy === "save"}
-                onChange={(event) => persistPatch({ action: event.target.value as QuotaAction })}
+          {windowMode === "mini" ? (
+            <>
+              <div className="limiter-mini-top">
+                <strong className={usageValueClass}>{Math.round(used)}%</strong>
+                <span className="limiter-reset-caption">{resetText}</span>
+              </div>
+              {usageBar}
+              <div className="limiter-mini-status">
+                <span className={`limiter-status limiter-status--${statusTone}`}>
+                  <span aria-hidden="true" />
+                  <strong>{phaseLabel}</strong>
+                </span>
+                <em>· at {threshold}%: {currentAction.shortLabel.toLowerCase()}</em>
+                {enabledSwitch(true)}
+              </div>
+            </>
+          ) : null}
+
+          {windowMode === "pill" ? (
+            <div className="limiter-pill" data-tauri-drag-region>
+              <Shield className="limiter-pill__icon" aria-hidden="true" />
+              <div className="limiter-pill__mid">
+                <div className="limiter-pill__row" data-tauri-drag-region>
+                  <strong className={usageValueClass}>
+                    {Math.round(used)}%<small>used</small>
+                  </strong>
+                  <span className="limiter-reset-caption">{shortResetText}</span>
+                </div>
+                {usageBar}
+              </div>
+              {enabledSwitch(true)}
+              <button
+                type="button"
+                className="limiter-pill__settings"
+                aria-label="Open settings"
+                onClick={openSettings}
               >
-                {responseOptions.map((option) => (
-                  <option value={option.value} key={option.value}>{option.title}</option>
-                ))}
-              </select>
-            </label>
-          </section>
-
-          <footer className="limiter-monitor-footer">
-            <div className="limiter-workspace">
-              <span aria-hidden="true" />
-              <strong>{workspaceLabel}</strong>
+                <Settings />
+              </button>
             </div>
-            {workspaces.length === 0 ? (
-              <button type="button" onClick={() => void connectWorkspace()} disabled={busy !== null}>
-                <FolderOpen /> Connect
-              </button>
-            ) : (
-              <button type="button" onClick={() => void refreshUsage()} disabled={busy !== null || !draft.enabled}>
-                <RefreshCw className={busy === "refresh" ? "limiter-spin" : ""} /> Refresh
-              </button>
-            )}
-            <span className="limiter-last-checked">
-              {quotaGuard.state?.snapshotFresh ? "Last checked now" : "Waiting for update"}
-            </span>
-          </footer>
+          ) : null}
 
           {error || notice ? (
             <div className={`limiter-feedback${error ? " is-error" : ""}`} role={error ? "alert" : "status"}>
@@ -382,19 +573,7 @@ export function UsageLimiterApp() {
                 <h1>Usage limiter</h1>
                 <p>Watch Codex quota and act at your limit</p>
               </div>
-              <label className="limiter-enabled-control">
-                <span>{draft.enabled ? "Enabled" : "Disabled"}</span>
-                <span className="reference-switch">
-                  <input
-                    type="checkbox"
-                    checked={draft.enabled}
-                    disabled={busy === "save"}
-                    onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
-                    aria-label={draft.enabled ? "Limiter enabled" : "Limiter disabled"}
-                  />
-                  <span aria-hidden="true" />
-                </span>
-              </label>
+              {enabledSwitch(false)}
             </section>
 
             <section className="limiter-settings-row limiter-settings-row--threshold">
@@ -445,6 +624,43 @@ export function UsageLimiterApp() {
               <p>{currentAction.description}</p>
             </section>
 
+            <section className="limiter-settings-row limiter-settings-row--window">
+              <h2>Window size</h2>
+              <div className="limiter-size-cards" role="group" aria-label="Window size">
+                {windowModeOptions.map((option) => (
+                  <button
+                    type="button"
+                    key={option.value}
+                    className={`limiter-size-card${draftWindowMode === option.value ? " is-selected" : ""}`}
+                    aria-pressed={draftWindowMode === option.value}
+                    onClick={() => setDraftWindowMode(option.value)}
+                  >
+                    <span className={`limiter-size-card__pict limiter-size-card__pict--${option.value}`} aria-hidden="true"><i /></span>
+                    <b>{option.label}</b>
+                    <small>{option.dims}</small>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="limiter-settings-row limiter-settings-row--foreground">
+              <div>
+                <h2>Keep in foreground</h2>
+                <p>Stay above other windows</p>
+              </div>
+              <label className="limiter-enabled-control">
+                <span className="reference-switch">
+                  <input
+                    type="checkbox"
+                    checked={draftAlwaysOnTop}
+                    onChange={(event) => setDraftAlwaysOnTop(event.target.checked)}
+                    aria-label="Keep in foreground"
+                  />
+                  <span aria-hidden="true" />
+                </span>
+              </label>
+            </section>
+
             <section className="limiter-settings-row limiter-settings-row--appearance">
               <h2>Appearance</h2>
               <div className="limiter-appearance-options">
@@ -462,6 +678,23 @@ export function UsageLimiterApp() {
                 >Dark</button>
               </div>
             </section>
+
+            {workspaces.length === 0 ? (
+              <section className="limiter-settings-row limiter-settings-row--workspace">
+                <div>
+                  <h2>Codex workspace</h2>
+                  <p>Connect the folder where Codex runs to read usage</p>
+                </div>
+                <button
+                  type="button"
+                  className="limiter-button limiter-button--quiet"
+                  onClick={() => void connectWorkspace()}
+                  disabled={busy !== null}
+                >
+                  <FolderOpen /> Connect
+                </button>
+              </section>
+            ) : null}
 
             {error ? <div className="limiter-feedback limiter-feedback--inline is-error" role="alert">{error}</div> : null}
           </div>

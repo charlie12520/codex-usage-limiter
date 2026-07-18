@@ -16,7 +16,22 @@ vi.mock("@tauri-apps/api/window", () => ({
     close: vi.fn(),
     minimize: vi.fn(),
     toggleMaximize: vi.fn(),
+    setSize: vi.fn(),
+    setMinSize: vi.fn(),
+    setResizable: vi.fn(),
+    setAlwaysOnTop: vi.fn(),
   }),
+}));
+
+vi.mock("@tauri-apps/api/dpi", () => ({
+  LogicalSize: class MockLogicalSize {
+    width: number;
+    height: number;
+    constructor(width: number, height: number) {
+      this.width = width;
+      this.height = height;
+    }
+  },
 }));
 
 vi.mock("@/features/quota-guard/hooks/useQuotaGuardState", () => ({
@@ -109,7 +124,19 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByRole("progressbar", { name: "Current Codex usage" }).getAttribute("aria-valuenow")).toBe("63");
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
     expect(screen.getByText("At 90%")).toBeTruthy();
-    expect(screen.getByText("Limiter project connected")).toBeTruthy();
+    expect(screen.getByText("Last checked just now")).toBeTruthy();
+  });
+
+  it("stages a window size change and applies it on save", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /320/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(screen.getByText("Codex Usage")).toBeTruthy());
+    expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("mini");
   });
 
   it("stages compact settings and saves response, threshold, and appearance together", async () => {

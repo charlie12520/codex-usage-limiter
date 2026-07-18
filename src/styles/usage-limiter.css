@@ -74,7 +74,8 @@ button {
 
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+.limiter-progress__handle:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 72%, var(--text));
   outline-offset: 2px;
 }
@@ -104,7 +105,7 @@ select:disabled {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 44px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--surface);
   color: var(--text);
@@ -129,8 +130,10 @@ select:disabled {
   cursor: pointer;
 }
 
+/* ---------- Titlebar ---------- */
+
 .limiter-titlebar {
-  height: 44px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -139,21 +142,36 @@ select:disabled {
   user-select: none;
 }
 
+.limiter-window[data-mode="mini"][data-screen="monitor"] .limiter-titlebar {
+  height: 30px;
+}
+
 .limiter-titlebar__brand {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-left: 16px;
-  font-size: 15px;
+  gap: 8px;
+  padding-left: 12px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
 .limiter-titlebar__brand > svg {
-  width: 20px;
-  height: 20px;
+  width: 15px;
+  height: 15px;
   stroke-width: 1.8;
+}
+
+.limiter-window[data-mode="mini"][data-screen="monitor"] .limiter-titlebar__brand {
+  padding-left: 10px;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.limiter-window[data-mode="mini"][data-screen="monitor"] .limiter-titlebar__brand > svg {
+  width: 13px;
+  height: 13px;
 }
 
 .limiter-titlebar__actions {
@@ -164,13 +182,17 @@ select:disabled {
 
 .limiter-titlebar__actions button,
 .limiter-back {
-  width: 44px;
+  width: 38px;
   height: 100%;
   display: grid;
   place-items: center;
   padding: 0;
   background: transparent;
   cursor: pointer;
+}
+
+.limiter-window[data-mode="mini"][data-screen="monitor"] .limiter-titlebar__actions button {
+  width: 32px;
 }
 
 .limiter-titlebar__actions button:hover,
@@ -185,16 +207,18 @@ select:disabled {
 
 .limiter-titlebar__actions svg,
 .limiter-back svg {
-  width: 17px;
-  height: 17px;
+  width: 14px;
+  height: 14px;
   stroke-width: 1.8;
 }
 
 .limiter-back {
-  width: 30px;
-  margin-left: -8px;
+  width: 28px;
+  margin-left: -6px;
   border-radius: 5px;
 }
+
+/* ---------- Shared monitor pieces ---------- */
 
 .limiter-page {
   min-width: 0;
@@ -203,33 +227,26 @@ select:disabled {
 
 .limiter-monitor-page {
   position: relative;
-  display: grid;
-  grid-template-rows: 54px minmax(0, 1fr) 48px 58px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: var(--surface);
 }
 
-.limiter-status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 22px;
-}
-
 .limiter-status,
-.limiter-enabled-control,
-.limiter-workspace {
+.limiter-enabled-control {
   display: flex;
   align-items: center;
 }
 
 .limiter-status {
-  gap: 9px;
-  font-size: 14px;
+  gap: 8px;
+  font-size: 12px;
 }
 
 .limiter-status > span {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: var(--muted);
 }
@@ -310,47 +327,51 @@ select:disabled {
   outline-offset: 2px;
 }
 
-.limiter-usage {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding: 10px 24px 30px;
+.limiter-mini-status .reference-switch,
+.limiter-pill .reference-switch {
+  width: 32px;
+  height: 18px;
 }
 
-.limiter-usage h1 {
-  margin: 0;
-  font-size: 15px;
-  line-height: 1.25;
-  font-weight: 500;
-  color: var(--muted);
+.limiter-mini-status .reference-switch > span::after,
+.limiter-pill .reference-switch > span::after {
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+}
+
+.limiter-mini-status .reference-switch input:checked + span::after,
+.limiter-pill .reference-switch input:checked + span::after {
+  transform: translateX(14px);
 }
 
 .limiter-usage__value {
   display: block;
-  margin-top: 2px;
-  font-size: clamp(48px, 10.5vh, 64px);
   line-height: 1;
   font-weight: 450;
-  letter-spacing: -0.055em;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
 }
 
 .limiter-usage__value.is-stale {
   color: var(--muted);
 }
 
-.limiter-usage p {
-  margin: 8px 0 0;
-  font-size: 14px;
+.limiter-reset-caption {
+  margin: 0;
+  font-size: 12px;
   color: var(--muted);
 }
+
+/* ---------- Usage bar + draggable threshold handle ---------- */
 
 .limiter-progress {
   --progress: 0%;
   --threshold: 90%;
   position: relative;
-  width: 100%;
-  height: 16px;
-  margin-top: auto;
+  align-self: stretch;
+  height: 12px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: var(--track);
@@ -364,102 +385,148 @@ select:disabled {
   background: var(--accent);
 }
 
-.limiter-progress__marker {
+.limiter-progress__fill.is-over {
+  background: var(--danger);
+}
+
+.limiter-progress__handle {
   position: absolute;
-  top: -6px;
-  bottom: -6px;
+  top: -5px;
+  bottom: -5px;
   left: var(--threshold);
-  width: 2px;
-  transform: translateX(-1px);
-  background: var(--text);
-}
-
-.limiter-progress__marker small {
-  position: absolute;
-  top: 27px;
-  left: 50%;
+  width: 12px;
   transform: translateX(-50%);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 2;
 }
 
-.limiter-response-row {
-  height: 48px;
-  display: grid;
-  grid-template-columns: minmax(110px, 0.85fr) minmax(220px, 1.15fr);
-  margin: 0 24px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  overflow: hidden;
-  background: var(--surface);
-}
-
-.limiter-response-row > span {
+.limiter-progress__knob {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
-  padding: 0 16px;
-  border-right: 1px solid var(--border);
-  font-size: 14px;
+  justify-content: center;
+  gap: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.limiter-progress__knob::before,
+.limiter-progress__knob::after {
+  content: "";
+  width: 1.5px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.limiter-progress__handle small {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 5px;
+  font-size: 10px;
   font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
-.limiter-response-row label {
-  min-width: 0;
+/* ---------- Compact mode ---------- */
+
+.limiter-compact-top {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px 0;
 }
 
-.limiter-response-row select {
+[data-mode="compact"] .limiter-usage__value {
+  font-size: 40px;
+}
+
+.limiter-compact-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  padding-top: 3px;
+}
+
+.limiter-compact-meta__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+[data-mode="compact"] .limiter-progress {
+  margin: auto 18px 26px;
+  align-self: auto;
+}
+
+.limiter-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 18px 12px;
+}
+
+.limiter-action-row > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.limiter-action-row label {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+
+.limiter-action-row select {
   width: 100%;
   min-width: 0;
-  padding: 0 14px;
-  border: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   background: var(--surface);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.limiter-response-row select:hover {
+.limiter-action-row select:hover {
   background: var(--surface-soft);
 }
 
-.limiter-monitor-footer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+.limiter-compact-footer {
+  display: flex;
   align-items: center;
-  gap: 16px;
-  margin-top: 12px;
-  padding: 0 22px;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 12px 0 18px;
   border-top: 1px solid var(--border);
   background: var(--titlebar);
 }
 
-.limiter-workspace {
-  min-width: 0;
-  gap: 9px;
-  font-size: 12px;
-}
-
-.limiter-workspace > span {
-  width: 9px;
-  height: 9px;
-  flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--healthy) 60%, var(--surface));
-  border-radius: 50%;
-  background: var(--healthy);
-}
-
-.limiter-workspace strong {
+.limiter-last-checked {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
-  font-weight: 500;
   text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--muted);
   white-space: nowrap;
 }
 
-.limiter-monitor-footer button {
-  min-height: 30px;
+.limiter-compact-footer button {
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -471,28 +538,180 @@ select:disabled {
   cursor: pointer;
 }
 
-.limiter-monitor-footer button:hover:not(:disabled) {
+.limiter-compact-footer button:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
   background: var(--accent-soft);
 }
 
-.limiter-monitor-footer button svg {
+.limiter-compact-footer button svg {
   width: 13px;
   height: 13px;
 }
 
-.limiter-last-checked {
+/* ---------- Mini mode ---------- */
+
+[data-mode="mini"] .limiter-monitor-page {
+  padding: 10px 14px 12px;
+}
+
+.limiter-mini-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+[data-mode="mini"] .limiter-usage__value {
+  font-size: 30px;
+  font-weight: 500;
+}
+
+[data-mode="mini"] .limiter-reset-caption {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-mode="mini"] .limiter-progress {
+  height: 10px;
+  margin-top: auto;
+  margin-bottom: 22px;
+}
+
+.limiter-mini-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
+  overflow: hidden;
 }
+
+.limiter-mini-status .limiter-status {
+  gap: 6px;
+  font-size: 11px;
+}
+
+.limiter-mini-status .limiter-status > span {
+  width: 7px;
+  height: 7px;
+}
+
+.limiter-mini-status em {
+  font-style: normal;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Pill mode ---------- */
+
+[data-mode="pill"] .limiter-monitor-page {
+  height: 100%;
+}
+
+.limiter-pill {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 11px;
+  height: 100%;
+  padding: 0 14px;
+}
+
+.limiter-pill__icon {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.8;
+  color: var(--accent);
+}
+
+.limiter-pill__mid {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding-bottom: 13px;
+}
+
+.limiter-pill__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+[data-mode="pill"] .limiter-usage__value {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+[data-mode="pill"] .limiter-usage__value small {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0;
+  margin-left: 3px;
+}
+
+[data-mode="pill"] .limiter-reset-caption {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+[data-mode="pill"] .limiter-progress {
+  height: 8px;
+}
+
+[data-mode="pill"] .limiter-progress__handle {
+  top: -4px;
+  bottom: -4px;
+  width: 10px;
+}
+
+[data-mode="pill"] .limiter-progress__handle small {
+  margin-top: 3px;
+  font-size: 9px;
+}
+
+[data-mode="pill"] .limiter-progress__knob::before,
+[data-mode="pill"] .limiter-progress__knob::after {
+  height: 5px;
+}
+
+.limiter-pill__settings {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.limiter-pill__settings:hover {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.limiter-pill__settings svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---------- Feedback toast ---------- */
 
 .limiter-feedback {
   position: absolute;
-  right: 16px;
-  bottom: 66px;
+  right: 12px;
+  bottom: 50px;
   z-index: 4;
-  max-width: min(360px, calc(100% - 32px));
+  max-width: min(340px, calc(100% - 24px));
   display: flex;
   align-items: center;
   gap: 10px;
@@ -502,6 +721,12 @@ select:disabled {
   background: var(--surface);
   box-shadow: 0 8px 24px var(--shadow);
   font-size: 12px;
+}
+
+[data-mode="pill"] .limiter-feedback {
+  top: 6px;
+  right: 6px;
+  bottom: auto;
 }
 
 .limiter-feedback.is-error {
@@ -527,6 +752,8 @@ select:disabled {
   width: 14px;
   height: 14px;
 }
+
+/* ---------- Settings ---------- */
 
 .limiter-settings-page {
   display: grid;
@@ -697,6 +924,104 @@ select:disabled {
   margin-top: 5px;
 }
 
+.limiter-settings-row--window {
+  padding: 10px 0 12px;
+}
+
+.limiter-size-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.limiter-size-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 9px 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.limiter-size-card:hover:not(:disabled) {
+  background: var(--surface-soft);
+}
+
+.limiter-size-card.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.limiter-size-card__pict {
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.limiter-size-card.is-selected .limiter-size-card__pict {
+  color: var(--text);
+}
+
+.limiter-size-card__pict i {
+  display: block;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+}
+
+.limiter-size-card__pict--compact i {
+  width: 36px;
+  height: 20px;
+}
+
+.limiter-size-card__pict--mini i {
+  width: 26px;
+  height: 14px;
+}
+
+.limiter-size-card__pict--pill i {
+  width: 30px;
+  height: 9px;
+  border-radius: 5px;
+}
+
+.limiter-size-card b {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.limiter-size-card small {
+  font-size: 9.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.limiter-settings-row--foreground,
+.limiter-settings-row--workspace {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 8px 0;
+}
+
+.limiter-settings-row--workspace button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.limiter-settings-row--workspace button svg {
+  width: 13px;
+  height: 13px;
+}
+
 .limiter-settings-row--appearance {
   min-height: 58px;
   display: grid;
@@ -787,62 +1112,6 @@ select:disabled {
 
 @keyframes limiter-spin {
   to { transform: rotate(360deg); }
-}
-
-@media (max-width: 560px) {
-  .limiter-status-row,
-  .limiter-monitor-footer,
-  .limiter-settings-footer {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-
-  .limiter-usage {
-    padding-left: 18px;
-    padding-right: 18px;
-  }
-
-  .limiter-response-row {
-    margin-left: 18px;
-    margin-right: 18px;
-    grid-template-columns: 110px minmax(0, 1fr);
-  }
-
-  .limiter-settings-content {
-    padding-left: 18px;
-    padding-right: 18px;
-  }
-
-  .limiter-last-checked {
-    display: none;
-  }
-
-  .limiter-monitor-footer {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-}
-
-@media (max-height: 410px) {
-  .limiter-monitor-page {
-    grid-template-rows: 48px minmax(0, 1fr) 44px 48px;
-  }
-
-  .limiter-usage {
-    padding-top: 4px;
-    padding-bottom: 24px;
-  }
-
-  .limiter-usage__value {
-    font-size: 44px;
-  }
-
-  .limiter-monitor-footer {
-    margin-top: 8px;
-  }
-
-  .limiter-settings-content {
-    overflow-y: auto;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
