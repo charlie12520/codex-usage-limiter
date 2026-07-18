@@ -218,6 +218,15 @@ export function UsageLimiterApp() {
     void persistDraft({ ...settings.quotaGuard, ...patch });
   }, [persistDraft, settings]);
 
+  // Tracking has no user-facing switch: the app enables the guard itself once
+  // a workspace exists. The green titlebar switch only arms/disarms responses.
+  const autoEnableTried = useRef(false);
+  useEffect(() => {
+    if (autoEnableTried.current || !settings || settings.quotaGuard.enabled || workspaces.length === 0) return;
+    autoEnableTried.current = true;
+    persistPatch({ enabled: true });
+  }, [settings, workspaces.length, persistPatch]);
+
   const setDraftFloor = useCallback((remainingFloor: number) => {
     const usedThreshold = 100 - clampRemainingFloor(remainingFloor);
     setDraft((current) => current ? {
@@ -237,7 +246,10 @@ export function UsageLimiterApp() {
       const nextWorkspaces = await listWorkspaces();
       setWorkspaces(nextWorkspaces);
       if (settings) {
-        const updated = await updateAppSettings(settings);
+        const updated = await updateAppSettings({
+          ...settings,
+          quotaGuard: { ...settings.quotaGuard, enabled: true },
+        });
         setSettings(updated);
         setDraft(updated.quotaGuard);
       }
@@ -400,21 +412,6 @@ export function UsageLimiterApp() {
     </label>
   );
 
-  const settingsEnabledSwitch = (
-    <label className="limiter-enabled-control">
-      <span className="sr-only">{draft.enabled ? "Enabled" : "Disabled"}</span>
-      <span className="reference-switch">
-        <input
-          type="checkbox"
-          checked={draft.enabled}
-          disabled={busy === "save"}
-          onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
-          aria-label={draft.enabled ? "Limiter enabled" : "Limiter disabled"}
-        />
-        <span aria-hidden="true" />
-      </span>
-    </label>
-  );
 
   const usageBar = (
     <div
@@ -432,7 +429,7 @@ export function UsageLimiterApp() {
         className={`limiter-progress__handle${armed ? "" : " is-disarmed"}`}
         role="slider"
         tabIndex={armed ? 0 : -1}
-        aria-label="Stop threshold"
+        aria-label="Trigger threshold"
         aria-disabled={!armed}
         aria-valuemin={1}
         aria-valuemax={99}
@@ -600,17 +597,9 @@ export function UsageLimiterApp() {
       ) : (
         <div className="limiter-page limiter-settings-page">
           <div className="limiter-settings-content">
-            <section className="limiter-settings-row limiter-settings-row--toggle">
-              <div>
-                <h1>Usage limiter</h1>
-                <p>Watch Codex quota and act at your limit</p>
-              </div>
-              {settingsEnabledSwitch}
-            </section>
-
             <section className="limiter-settings-row limiter-settings-row--threshold">
               <div className="limiter-setting-heading">
-                <h2>Stop new work below</h2>
+                <h2>Trigger response below</h2>
                 <label className="limiter-percent-input">
                   <input
                     type="number"
@@ -618,7 +607,7 @@ export function UsageLimiterApp() {
                     max={99}
                     disabled={busy === "save"}
                     value={floor}
-                    aria-label="Stop new work percentage"
+                    aria-label="Trigger percentage"
                     onChange={(event) => setDraftFloor(Number(event.target.value))}
                   />
                   <span>% left</span>
@@ -632,7 +621,7 @@ export function UsageLimiterApp() {
                 disabled={busy === "save"}
                 value={floor}
                 style={{ "--range-progress": `${floor}%` } as CSSProperties}
-                aria-label="Stop new work below"
+                aria-label="Trigger response below"
                 onChange={(event) => setDraftFloor(Number(event.target.value))}
               />
             </section>

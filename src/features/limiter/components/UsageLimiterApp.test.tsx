@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QuotaGuardPublicState } from "@/features/quota-guard/quotaGuardTypes";
@@ -146,10 +146,9 @@ describe("UsageLimiterApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(screen.getByText("Settings")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Usage limiter" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Stop new work percentage" }), {
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
       target: { value: "25" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Dark" }));
@@ -197,7 +196,7 @@ describe("UsageLimiterApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Stop new work percentage" }), {
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
       target: { value: "82" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -245,11 +244,11 @@ describe("UsageLimiterApp", () => {
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Stop new work percentage" }), {
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
       target: { value: "" },
     });
 
-    expect((screen.getByRole("spinbutton", { name: "Stop new work percentage" }) as HTMLInputElement).value).toBe("1");
+    expect((screen.getByRole("spinbutton", { name: "Trigger percentage" }) as HTMLInputElement).value).toBe("1");
   });
 
   it("restores the persisted armed toggle when its immediate update fails", async () => {
@@ -271,7 +270,7 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
-    const handle = screen.getByRole("slider", { name: "Stop threshold" });
+    const handle = screen.getByRole("slider", { name: "Trigger threshold" });
     expect(handle.className).toContain("is-disarmed");
     expect(handle.getAttribute("aria-disabled")).toBe("true");
     expect(handle.getAttribute("tabindex")).toBe("-1");
