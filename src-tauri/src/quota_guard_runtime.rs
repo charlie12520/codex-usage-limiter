@@ -179,7 +179,9 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                     if matches!(account.phase, QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset) {
                         if let Some(verify_at) = account.verify_at { schedule_verification(&handle, generation, verify_at); }
                     } else if account.phase == QuotaGuardPhase::Monitoring {
-                        schedule_healthy_revalidation(&handle, generation, now_ms().saturating_add(300_000));
+                        // First read fires immediately so a fresh launch shows current
+                        // usage instead of the persisted snapshot from the last run.
+                        schedule_healthy_revalidation(&handle, generation, now_ms());
                     }
                     apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::RehydratePendingInterrupts { now_ms: now_ms() }).await
                 } else {
@@ -216,7 +218,7 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                         Ok(()) => {
                             let runtime = handle.runtime().await;
                             if runtime.lifecycle_generation == generation && runtime.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Monitoring) {
-                                schedule_healthy_revalidation(&handle, generation, now_ms().saturating_add(300_000));
+                                schedule_healthy_revalidation(&handle, generation, now_ms().saturating_add(60_000));
                             }
                             Ok(())
                         }
@@ -387,7 +389,7 @@ async fn bootstrap_workspace(handle: &QuotaGuardHandle, app: &AppHandle, path: &
     persist_current(handle, path).await?;
     let runtime = handle.runtime().await;
     if runtime.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Monitoring) {
-        schedule_healthy_revalidation(handle, runtime.lifecycle_generation, now_ms().saturating_add(300_000));
+        schedule_healthy_revalidation(handle, runtime.lifecycle_generation, now_ms().saturating_add(60_000));
     }
     if handle.inner.gate.policy() == ProcessPolicy::EnabledOpen { handle.inner.gate.set_epoch_open(&epoch, workspace_id, true); }
     Ok(())

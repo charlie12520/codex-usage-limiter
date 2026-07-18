@@ -83,21 +83,27 @@ function clampThreshold(value: number) {
   return Math.max(1, Math.round(clampPercent(value)));
 }
 
+function remainingParts(timestamp: number) {
+  const remainingMinutes = Math.max(0, Math.ceil((timestamp * 1000 - Date.now()) / 60_000));
+  const days = Math.floor(remainingMinutes / 1440);
+  const hours = Math.floor((remainingMinutes % 1440) / 60);
+  const minutes = remainingMinutes % 60;
+  return { remainingMinutes, days, hours, minutes };
+}
+
 function formatReset(timestamp: number | null | undefined) {
   if (!timestamp) return "Reset time unavailable";
-  const remainingMinutes = Math.max(0, Math.ceil((timestamp * 1000 - Date.now()) / 60_000));
+  const { remainingMinutes, days, hours, minutes } = remainingParts(timestamp);
   if (remainingMinutes === 0) return "Reset pending";
-  const hours = Math.floor(remainingMinutes / 60);
-  const minutes = remainingMinutes % 60;
+  if (days > 0) return `Resets in ${days}d ${hours}h ${minutes}m`;
   return hours > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${minutes}m`;
 }
 
 function formatResetShort(timestamp: number | null | undefined) {
   if (!timestamp) return "no reset data";
-  const remainingMinutes = Math.max(0, Math.ceil((timestamp * 1000 - Date.now()) / 60_000));
+  const { remainingMinutes, days, hours, minutes } = remainingParts(timestamp);
   if (remainingMinutes === 0) return "reset pending";
-  const hours = Math.floor(remainingMinutes / 60);
-  const minutes = remainingMinutes % 60;
+  if (days > 0) return `resets ${days}d ${hours}h`;
   return hours > 0 ? `resets ${hours}h ${minutes}m` : `resets ${minutes}m`;
 }
 
@@ -454,6 +460,7 @@ export function UsageLimiterApp() {
             )}
           </div>
           <div className="limiter-titlebar__actions">
+            {screen === "monitor" ? enabledSwitch(true) : null}
             {screen === "monitor" ? (
               <button type="button" aria-label="Open settings" onClick={openSettings}><Settings /></button>
             ) : null}
@@ -472,13 +479,10 @@ export function UsageLimiterApp() {
               <div className="limiter-compact-top">
                 <strong className={usageValueClass}>{Math.round(used)}%</strong>
                 <div className="limiter-compact-meta">
-                  <div className="limiter-compact-meta__row">
-                    <span className={`limiter-status limiter-status--${statusTone}`}>
-                      <span aria-hidden="true" />
-                      <strong>{phaseLabel}</strong>
-                    </span>
-                    {enabledSwitch(true)}
-                  </div>
+                  <span className={`limiter-status limiter-status--${statusTone}`}>
+                    <span aria-hidden="true" />
+                    <strong>{phaseLabel}</strong>
+                  </span>
                   <p className="limiter-reset-caption">{resetText}</p>
                 </div>
               </div>
@@ -526,10 +530,8 @@ export function UsageLimiterApp() {
               <div className="limiter-mini-status">
                 <span className={`limiter-status limiter-status--${statusTone}`}>
                   <span aria-hidden="true" />
-                  <strong>{phaseLabel}</strong>
                 </span>
-                <em>· at {threshold}%: {currentAction.shortLabel.toLowerCase()}</em>
-                {enabledSwitch(true)}
+                <em>at {threshold}%: {currentAction.shortLabel.toLowerCase()}</em>
               </div>
             </>
           ) : null}

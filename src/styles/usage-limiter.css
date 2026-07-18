@@ -327,13 +327,13 @@ select:disabled {
   outline-offset: 2px;
 }
 
-.limiter-mini-status .reference-switch,
+.limiter-titlebar .reference-switch,
 .limiter-pill .reference-switch {
   width: 32px;
   height: 18px;
 }
 
-.limiter-mini-status .reference-switch > span::after,
+.limiter-titlebar .reference-switch > span::after,
 .limiter-pill .reference-switch > span::after {
   top: 2px;
   left: 2px;
@@ -341,9 +341,14 @@ select:disabled {
   height: 12px;
 }
 
-.limiter-mini-status .reference-switch input:checked + span::after,
+.limiter-titlebar .reference-switch input:checked + span::after,
 .limiter-pill .reference-switch input:checked + span::after {
   transform: translateX(14px);
+}
+
+.limiter-titlebar__actions .limiter-enabled-control {
+  align-self: center;
+  padding: 0 8px;
 }
 
 .limiter-usage__value {
@@ -396,9 +401,13 @@ select:disabled {
   left: var(--threshold);
   width: 12px;
   transform: translateX(-50%);
-  cursor: ew-resize;
+  cursor: grab;
   touch-action: none;
   z-index: 2;
+}
+
+.limiter-progress__handle:active {
+  cursor: grabbing;
 }
 
 .limiter-progress__knob {
@@ -456,12 +465,6 @@ select:disabled {
   align-items: flex-end;
   gap: 5px;
   padding-top: 3px;
-}
-
-.limiter-compact-meta__row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 
 [data-mode="compact"] .limiter-progress {
