@@ -121,9 +121,9 @@ describe("UsageLimiterApp", () => {
 
     expect(await screen.findByRole("heading", { name: "Current usage" })).toBeTruthy();
     expect(screen.getByText("Monitoring")).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "Current Codex usage" }).getAttribute("aria-valuenow")).toBe("63");
+    expect(screen.getByRole("progressbar", { name: "Current Codex usage" }).getAttribute("aria-valuenow")).toBe("37");
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
-    expect(screen.getByText("At 90%")).toBeTruthy();
+    expect(screen.getByText("Below 10%")).toBeTruthy();
     expect(screen.getByText("Last checked just now")).toBeTruthy();
   });
 
@@ -149,7 +149,7 @@ describe("UsageLimiterApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Stop new work percentage" }), {
-      target: { value: "82" },
+      target: { value: "25" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Dark" }));
     expect(updateAppSettings).not.toHaveBeenCalled();
@@ -159,8 +159,8 @@ describe("UsageLimiterApp", () => {
     await waitFor(() => expect(updateAppSettings).toHaveBeenCalledOnce());
     const updated = vi.mocked(updateAppSettings).mock.calls[0]?.[0].quotaGuard;
     expect(updated.action).toBe("finishCurrentTurn");
-    expect(updated.primaryThresholdPercent).toBe(82);
-    expect(updated.secondaryThresholdPercent).toBe(82);
+    expect(updated.primaryThresholdPercent).toBe(75);
+    expect(updated.secondaryThresholdPercent).toBe(75);
     await waitFor(() => expect(document.documentElement.dataset.appearance).toBe("dark"));
     expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy();
   });
@@ -203,7 +203,7 @@ describe("UsageLimiterApp", () => {
 
     expect(updateAppSettings).not.toHaveBeenCalled();
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
-    expect(screen.getByText("At 90%")).toBeTruthy();
+    expect(screen.getByText("Below 10%")).toBeTruthy();
   });
 
   it("keeps settings open and restores persisted values when save fails", async () => {
@@ -236,7 +236,7 @@ describe("UsageLimiterApp", () => {
     await screen.findByRole("heading", { name: "Current usage" });
 
     expect(screen.getByText("Stale reading — refresh for current usage")).toBeTruthy();
-    expect(screen.getByText("63%").className).toContain("is-stale");
+    expect(screen.getByText("37%").className).toContain("is-stale");
   });
 
   it("clamps the staged threshold to at least 1 percent when the field is cleared", async () => {

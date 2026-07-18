@@ -79,8 +79,9 @@ function clampPercent(value: number | undefined | null) {
   return Math.min(100, Math.max(0, Number.isFinite(value) ? Number(value) : 0));
 }
 
-function clampThreshold(value: number) {
-  return Math.max(1, Math.round(clampPercent(value)));
+/** The UI works in "% remaining"; the backend stores "% used". */
+function clampRemainingFloor(value: number) {
+  return Math.min(99, Math.max(1, Math.round(Number.isFinite(value) ? Number(value) : 0)));
 }
 
 function remainingParts(timestamp: number) {
@@ -217,12 +218,12 @@ export function UsageLimiterApp() {
     void persistDraft({ ...settings.quotaGuard, ...patch });
   }, [persistDraft, settings]);
 
-  const setDraftThreshold = useCallback((value: number) => {
-    const threshold = clampThreshold(value);
+  const setDraftFloor = useCallback((remainingFloor: number) => {
+    const usedThreshold = 100 - clampRemainingFloor(remainingFloor);
     setDraft((current) => current ? {
       ...current,
-      primaryThresholdPercent: threshold,
-      secondaryThresholdPercent: threshold,
+      primaryThresholdPercent: usedThreshold,
+      secondaryThresholdPercent: usedThreshold,
     } : current);
   }, []);
 
@@ -275,10 +276,12 @@ export function UsageLimiterApp() {
     [quotaGuard.state?.snapshot?.primary, quotaGuard.state?.snapshot?.secondary],
   );
   const used = clampPercent(activeWindow?.usedPercent);
-  const threshold = draft
+  const remaining = Math.round(100 - used);
+  const usedThreshold = draft
     ? Math.min(draft.primaryThresholdPercent, draft.secondaryThresholdPercent)
     : 90;
-  const barStyle = { "--progress": `${used}%`, "--threshold": `${threshold}%` } as CSSProperties;
+  const floor = 100 - usedThreshold;
+  const barStyle = { "--progress": `${remaining}%`, "--threshold": `${floor}%` } as CSSProperties;
   const currentAction = responseOptions.find((option) => option.value === draft?.action)
     ?? responseOptions[0];
   const phaseLabel = quotaGuard.state
@@ -291,43 +294,44 @@ export function UsageLimiterApp() {
       : "neutral";
   const snapshotStale = Boolean(activeWindow) && quotaGuard.state?.snapshotFresh === false;
 
-  const thresholdFromPointer = useCallback((clientX: number) => {
+  const floorFromPointer = useCallback((clientX: number) => {
     const rect = barRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0) return null;
-    return clampThreshold(((clientX - rect.left) / rect.width) * 100);
+    return clampRemainingFloor(((clientX - rect.left) / rect.width) * 100);
   }, []);
 
-  const persistThreshold = useCallback((value: number) => {
+  const persistFloor = useCallback((remainingFloor: number) => {
     if (!settings) return;
-    if (settings.quotaGuard.primaryThresholdPercent === value
-      && settings.quotaGuard.secondaryThresholdPercent === value) {
-      setDraftThreshold(value);
+    const usedThreshold = 100 - clampRemainingFloor(remainingFloor);
+    if (settings.quotaGuard.primaryThresholdPercent === usedThreshold
+      && settings.quotaGuard.secondaryThresholdPercent === usedThreshold) {
+      setDraftFloor(remainingFloor);
       return;
     }
-    persistPatch({ primaryThresholdPercent: value, secondaryThresholdPercent: value });
-  }, [persistPatch, setDraftThreshold, settings]);
+    persistPatch({ primaryThresholdPercent: usedThreshold, secondaryThresholdPercent: usedThreshold });
+  }, [persistPatch, setDraftFloor, settings]);
 
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (busy === "save") return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    dragValue.current = threshold;
-  }, [busy, threshold]);
+    dragValue.current = floor;
+  }, [busy, floor]);
 
   const handlePointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (dragValue.current === null) return;
-    const next = thresholdFromPointer(event.clientX);
+    const next = floorFromPointer(event.clientX);
     if (next !== null && next !== dragValue.current) {
       dragValue.current = next;
-      setDraftThreshold(next);
+      setDraftFloor(next);
     }
-  }, [setDraftThreshold, thresholdFromPointer]);
+  }, [setDraftFloor, floorFromPointer]);
 
   const handlePointerUp = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (dragValue.current === null) return;
-    const next = thresholdFromPointer(event.clientX) ?? dragValue.current;
+    const next = floorFromPointer(event.clientX) ?? dragValue.current;
     dragValue.current = null;
-    persistThreshold(next);
-  }, [persistThreshold, thresholdFromPointer]);
+    persistFloor(next);
+  }, [persistFloor, floorFromPointer]);
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     const delta = event.key === "ArrowRight" || event.key === "ArrowUp"
@@ -336,8 +340,8 @@ export function UsageLimiterApp() {
     if (delta === 0) return;
     event.preventDefault();
     if (busy === "save") return;
-    persistThreshold(clampThreshold(threshold + delta));
-  }, [busy, persistThreshold, threshold]);
+    persistFloor(clampRemainingFloor(floor + delta));
+  }, [busy, persistFloor, floor]);
 
   if (!draft || !settings) {
     return (
@@ -404,24 +408,24 @@ export function UsageLimiterApp() {
       aria-label="Current Codex usage"
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={Math.round(used)}
+      aria-valuenow={remaining}
     >
-      <span className={`limiter-progress__fill${used >= threshold ? " is-over" : ""}`} />
+      <span className={`limiter-progress__fill${remaining <= floor ? " is-over" : ""}`} />
       <span
         className="limiter-progress__handle"
         role="slider"
         tabIndex={0}
-        aria-label="Usage threshold"
+        aria-label="Stop threshold"
         aria-valuemin={1}
-        aria-valuemax={100}
-        aria-valuenow={threshold}
+        aria-valuemax={99}
+        aria-valuenow={floor}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onKeyDown={handleKeyDown}
       >
         <span className="limiter-progress__knob" aria-hidden="true" />
-        <small aria-hidden="true">{threshold}%</small>
+        <small aria-hidden="true">{floor}%</small>
       </span>
     </div>
   );
@@ -477,7 +481,7 @@ export function UsageLimiterApp() {
           {windowMode === "compact" ? (
             <>
               <div className="limiter-compact-top">
-                <strong className={usageValueClass}>{Math.round(used)}%</strong>
+                <strong className={usageValueClass}>{remaining}%</strong>
                 <div className="limiter-compact-meta">
                   <span className={`limiter-status limiter-status--${statusTone}`}>
                     <span aria-hidden="true" />
@@ -488,7 +492,7 @@ export function UsageLimiterApp() {
               </div>
               {usageBar}
               <div className="limiter-action-row">
-                <span>At {threshold}%</span>
+                <span>Below {floor}%</span>
                 <label>
                   <span className="sr-only">When limit is reached</span>
                   <select
@@ -523,7 +527,7 @@ export function UsageLimiterApp() {
           {windowMode === "mini" ? (
             <>
               <div className="limiter-mini-top">
-                <strong className={usageValueClass}>{Math.round(used)}%</strong>
+                <strong className={usageValueClass}>{remaining}%</strong>
                 <span className="limiter-reset-caption">{resetText}</span>
               </div>
               {usageBar}
@@ -531,7 +535,7 @@ export function UsageLimiterApp() {
                 <span className={`limiter-status limiter-status--${statusTone}`}>
                   <span aria-hidden="true" />
                 </span>
-                <em>at {threshold}%: {currentAction.shortLabel.toLowerCase()}</em>
+                <em>below {floor}%: {currentAction.shortLabel.toLowerCase()}</em>
               </div>
             </>
           ) : null}
@@ -542,7 +546,7 @@ export function UsageLimiterApp() {
               <div className="limiter-pill__mid">
                 <div className="limiter-pill__row" data-tauri-drag-region>
                   <strong className={usageValueClass}>
-                    {Math.round(used)}%<small>used</small>
+                    {remaining}%<small>left</small>
                   </strong>
                   <span className="limiter-reset-caption">{shortResetText}</span>
                 </div>
@@ -580,30 +584,30 @@ export function UsageLimiterApp() {
 
             <section className="limiter-settings-row limiter-settings-row--threshold">
               <div className="limiter-setting-heading">
-                <h2>Stop new work at</h2>
+                <h2>Stop new work below</h2>
                 <label className="limiter-percent-input">
                   <input
                     type="number"
                     min={1}
-                    max={100}
+                    max={99}
                     disabled={busy === "save"}
-                    value={threshold}
+                    value={floor}
                     aria-label="Stop new work percentage"
-                    onChange={(event) => setDraftThreshold(Number(event.target.value))}
+                    onChange={(event) => setDraftFloor(Number(event.target.value))}
                   />
-                  <span>%</span>
+                  <span>% left</span>
                 </label>
               </div>
               <input
                 className="limiter-threshold-range"
                 type="range"
                 min={1}
-                max={100}
+                max={99}
                 disabled={busy === "save"}
-                value={threshold}
-                style={{ "--range-progress": `${threshold}%` } as CSSProperties}
-                aria-label="Stop new work at"
-                onChange={(event) => setDraftThreshold(Number(event.target.value))}
+                value={floor}
+                style={{ "--range-progress": `${floor}%` } as CSSProperties}
+                aria-label="Stop new work below"
+                onChange={(event) => setDraftFloor(Number(event.target.value))}
               />
             </section>
 
