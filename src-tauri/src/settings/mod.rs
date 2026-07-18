@@ -151,7 +151,7 @@ pub(crate) fn validate_quota_guard_settings(settings: &AppSettings) -> Result<()
     let guard = &settings.quota_guard;
     // Thresholds are u8, but retain the explicit boundary contract here so the
     // command remains correct if its serialized representation changes.
-    if guard.primary_threshold_percent > 100 || guard.secondary_threshold_percent > 100 {
+    if !(1..=100).contains(&guard.primary_threshold_percent) || !(1..=100).contains(&guard.secondary_threshold_percent) {
         return Err("QUOTA_GUARD_INVALID_THRESHOLD_PERCENT".to_string());
     }
     if !(1..=1440).contains(&guard.drain_timeout_minutes) {

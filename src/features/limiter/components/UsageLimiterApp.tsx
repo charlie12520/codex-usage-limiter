@@ -145,7 +145,7 @@ export function UsageLimiterApp() {
   }, [persistDraft, settings]);
 
   const setDraftThreshold = useCallback((value: number) => {
-    const threshold = Math.round(clampPercent(value));
+    const threshold = Math.max(1, Math.round(clampPercent(value)));
     setDraft((current) => current ? {
       ...current,
       primaryThresholdPercent: threshold,
@@ -307,8 +307,16 @@ export function UsageLimiterApp() {
 
           <section className="limiter-usage" aria-label="Current usage">
             <h1>Current usage</h1>
-            <strong className="limiter-usage__value">{Math.round(used)}%</strong>
-            <p>{activeWindow ? formatReset(activeWindow.resetsAt) : "No usage reading yet"}</p>
+            <strong className={`limiter-usage__value${activeWindow && quotaGuard.state?.snapshotFresh === false ? " is-stale" : ""}`}>
+              {Math.round(used)}%
+            </strong>
+            <p>
+              {activeWindow
+                ? quotaGuard.state?.snapshotFresh === false
+                  ? "Stale reading — refresh for current usage"
+                  : formatReset(activeWindow.resetsAt)
+                : "No usage reading yet"}
+            </p>
             <div
               className="limiter-progress"
               style={{ ...progressStyle, ...markerStyle }}

@@ -590,8 +590,7 @@ async fn handle_command(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathB
         QuotaGuardCommand::ApplyActionNow => apply_event(handle, app, path, bindings, ReducerEvent::ApplyActionNow { now_ms: now_ms() }).await?,
         QuotaGuardCommand::KeepWaiting => apply_event(handle, app, path, bindings, ReducerEvent::KeepWaiting { now_ms: now_ms() }).await?,
         QuotaGuardCommand::InterruptNow => {
-            let generation = handle.runtime().await.lifecycle_generation;
-            apply_event(handle, app, path, bindings, ReducerEvent::DrainDeadline { generation, now_ms: i64::MAX }).await?;
+            apply_event(handle, app, path, bindings, ReducerEvent::ForceInterrupt { now_ms: now_ms() }).await?;
         }
         QuotaGuardCommand::VerifyNow => verify_once(handle, app, path, bindings, true).await?,
         QuotaGuardCommand::RetryClosed => {

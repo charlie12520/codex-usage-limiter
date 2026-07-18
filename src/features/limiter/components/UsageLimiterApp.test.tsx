@@ -193,6 +193,37 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByText("Settings")).toBeTruthy();
   });
 
+  it("marks the usage reading as stale when the snapshot is no longer fresh", async () => {
+    vi.mocked(useQuotaGuardState).mockReturnValue({
+      state: { ...publicState, snapshotFresh: false },
+      queueResumeRequired: false,
+      applyActionNow: vi.fn(),
+      keepWaiting: vi.fn(),
+      interruptNow: vi.fn(),
+      verifyNow: vi.fn(),
+      resolveIntervention: vi.fn(),
+      resumeQueuedSends: vi.fn(),
+      requireQueueResume: vi.fn(),
+    });
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+
+    expect(screen.getByText("Stale reading — refresh for current usage")).toBeTruthy();
+    expect(screen.getByText("63%").className).toContain("is-stale");
+  });
+
+  it("clamps the staged threshold to at least 1 percent when the field is cleared", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Stop new work percentage" }), {
+      target: { value: "" },
+    });
+
+    expect((screen.getByRole("spinbutton", { name: "Stop new work percentage" }) as HTMLInputElement).value).toBe("1");
+  });
+
   it("restores the persisted dashboard toggle when its immediate update fails", async () => {
     vi.mocked(updateAppSettings).mockRejectedValueOnce(new Error("save rejected"));
     render(<UsageLimiterApp />);

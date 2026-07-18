@@ -334,6 +334,10 @@ select:disabled {
   letter-spacing: -0.055em;
 }
 
+.limiter-usage__value.is-stale {
+  color: var(--muted);
+}
+
 .limiter-usage p {
   margin: 8px 0 0;
   font-size: 14px;

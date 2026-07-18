@@ -32,6 +32,7 @@ pub(crate) enum ReducerEvent {
     ApplyActionNow { now_ms: i64 },
     FinalizeClosedEpisode { transition_id: u64, now_ms: i64 },
     DrainDeadline { generation: u64, now_ms: i64 },
+    ForceInterrupt { now_ms: i64 },
     KeepWaiting { now_ms: i64 },
     InterruptAcknowledged { turn: TurnKey, generation: u64, operation_id: u64, attempt: u8, now_ms: i64 },
     InterruptRequestFailed { turn: TurnKey, generation: u64, operation_id: u64, attempt: u8, now_ms: i64 },
@@ -547,6 +548,23 @@ pub(crate) fn reduce(mut runtime: QuotaGuardRuntimeState, event: ReducerEvent, s
                 None => enter_intervention(account, now_ms, "missing drain policy"),
             }
         }
+        ReducerEvent::ForceInterrupt { now_ms } => {
+            let generation = runtime.lifecycle_generation;
+            let operation_id = match next_operation_id(&mut runtime) {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Some(account) = runtime.account.as_mut() { enter_intervention(account, now_ms, &error); }
+                    return (runtime, effects);
+                }
+            };
+            let Some(account) = runtime.account.as_mut() else { return (runtime, effects) };
+            if !matches!(account.phase, QuotaGuardPhase::Draining | QuotaGuardPhase::AwaitingDrainDecision) { return (runtime, effects) }
+            if let Err(error) = begin_interrupting(account, account.allowed_drain_turns.clone(), generation, operation_id, now_ms, &mut effects) {
+                enter_intervention(account, now_ms, &error);
+            } else {
+                finish_if_empty(account, generation, now_ms, &mut effects);
+            }
+        }
         ReducerEvent::KeepWaiting { now_ms } => {
             let Some(account) = runtime.account.as_mut() else { return (runtime, effects) };
             if account.phase != QuotaGuardPhase::AwaitingDrainDecision { return (runtime, effects) }
@@ -791,6 +809,43 @@ mod tests {
         let (state, effects) = reduce(state, ReducerEvent::DrainDeadline { generation, now_ms: 910_000 }, &settings);
         let account = state.account.unwrap();
         assert_eq!(account.pending_interrupt_index.len(), 1);
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::Interrupt { turn, .. } if turn.turn_id == "turn")));
+    }
+
+    #[test]
+    fn force_interrupt_interrupts_mid_drain_regardless_of_timeout_action() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.action = QuotaAction::FinishCurrentTurn;
+        let (state, _) = reduce(Default::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 10_000 }, &settings);
+        let (mut state, _) = reduce(state, ReducerEvent::Snapshot { snapshot: snapshot(90, true), full_read: true, verification: false, now_ms: 10_000 }, &settings);
+        let generation = state.lifecycle_generation;
+        state.account.as_mut().unwrap().local_turn_registry.push(crate::shared::quota_guard::model::TurnKey {
+            session_epoch: "epoch".into(), workspace_id: "workspace".into(), thread_id: "thread".into(), turn_id: "turn".into(),
+        });
+        let (state, _) = reduce(state, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: 10_000 }, &settings);
+        let (state, effects) = reduce(state, ReducerEvent::ForceInterrupt { now_ms: 20_000 }, &settings);
+        let account = state.account.unwrap();
+        assert_eq!(account.phase, crate::shared::quota_guard::model::QuotaGuardPhase::Interrupting);
+        assert_eq!(account.pending_interrupt_index.len(), 1);
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::Interrupt { turn, .. } if turn.turn_id == "turn")));
+    }
+
+    #[test]
+    fn force_interrupt_recovers_from_awaiting_drain_decision() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.action = QuotaAction::FinishCurrentTurn;
+        let (state, _) = reduce(Default::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 10_000 }, &settings);
+        let (mut state, _) = reduce(state, ReducerEvent::Snapshot { snapshot: snapshot(90, true), full_read: true, verification: false, now_ms: 10_000 }, &settings);
+        let generation = state.lifecycle_generation;
+        state.account.as_mut().unwrap().local_turn_registry.push(crate::shared::quota_guard::model::TurnKey {
+            session_epoch: "epoch".into(), workspace_id: "workspace".into(), thread_id: "thread".into(), turn_id: "turn".into(),
+        });
+        let (state, _) = reduce(state, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: 10_000 }, &settings);
+        let (state, _) = reduce(state, ReducerEvent::DrainDeadline { generation, now_ms: 910_000 }, &settings);
+        assert_eq!(state.account.as_ref().unwrap().phase, crate::shared::quota_guard::model::QuotaGuardPhase::AwaitingDrainDecision);
+        let (state, effects) = reduce(state, ReducerEvent::ForceInterrupt { now_ms: 920_000 }, &settings);
+        let account = state.account.unwrap();
+        assert_eq!(account.phase, crate::shared::quota_guard::model::QuotaGuardPhase::Interrupting);
         assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::Interrupt { turn, .. } if turn.turn_id == "turn")));
     }
 
