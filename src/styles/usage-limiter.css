@@ -410,6 +410,16 @@ select:disabled {
   cursor: grabbing;
 }
 
+.limiter-progress__handle.is-disarmed {
+  pointer-events: none;
+  cursor: default;
+}
+
+.limiter-progress__handle.is-disarmed .limiter-progress__knob,
+.limiter-progress__handle.is-disarmed small {
+  opacity: 0.4;
+}
+
 .limiter-progress__knob {
   position: absolute;
   inset: 0;
@@ -611,6 +621,12 @@ select:disabled {
 }
 
 /* ---------- Pill mode ---------- */
+
+/* No titlebar in pill monitor mode: collapse to a single full-height row so
+   the pill fills the window instead of sitting in the auto row. */
+.limiter-window[data-mode="pill"][data-screen="monitor"] {
+  grid-template-rows: minmax(0, 1fr);
+}
 
 [data-mode="pill"] .limiter-monitor-page {
   height: 100%;

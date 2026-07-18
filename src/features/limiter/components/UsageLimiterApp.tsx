@@ -183,12 +183,12 @@ export function UsageLimiterApp() {
       try {
         const appWindow = getCurrentWindow();
         const target = screen === "settings" ? SETTINGS_WINDOW : MODE_WINDOWS[windowMode];
+        await appWindow.setAlwaysOnTop(alwaysOnTop);
         await appWindow.setResizable(screen === "monitor" && target.resizable);
         await appWindow.setMinSize(new LogicalSize(target.minWidth, target.minHeight));
         await appWindow.setSize(new LogicalSize(target.width, target.height));
-        await appWindow.setAlwaysOnTop(alwaysOnTop);
-      } catch {
-        // window API unavailable (e.g. tests) — layout still renders
+      } catch (windowError) {
+        setError(`Window update failed: ${String(windowError)}`);
       }
     })();
   }, [screen, windowMode, alwaysOnTop]);
@@ -377,11 +377,30 @@ export function UsageLimiterApp() {
     setAppearance(draftAppearance);
     setWindowMode(draftWindowMode);
     setAlwaysOnTop(draftAlwaysOnTop);
-    setNotice("Settings saved.");
     setScreen("monitor");
   };
 
-  const enabledSwitch = (persistImmediately: boolean) => (
+  const armed = draft.armed !== false;
+
+  const armedSwitch = (
+    <label
+      className="limiter-enabled-control"
+      title={armed ? "Responses armed" : "Responses off — still tracking"}
+    >
+      <span className="reference-switch">
+        <input
+          type="checkbox"
+          checked={armed}
+          disabled={busy === "save"}
+          onChange={(event) => persistPatch({ armed: event.target.checked })}
+          aria-label={armed ? "Limiter armed" : "Limiter disarmed"}
+        />
+        <span aria-hidden="true" />
+      </span>
+    </label>
+  );
+
+  const settingsEnabledSwitch = (
     <label className="limiter-enabled-control">
       <span className="sr-only">{draft.enabled ? "Enabled" : "Disabled"}</span>
       <span className="reference-switch">
@@ -389,9 +408,7 @@ export function UsageLimiterApp() {
           type="checkbox"
           checked={draft.enabled}
           disabled={busy === "save"}
-          onChange={(event) => persistImmediately
-            ? persistPatch({ enabled: event.target.checked })
-            : setDraft({ ...draft, enabled: event.target.checked })}
+          onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
           aria-label={draft.enabled ? "Limiter enabled" : "Limiter disabled"}
         />
         <span aria-hidden="true" />
@@ -412,10 +429,11 @@ export function UsageLimiterApp() {
     >
       <span className={`limiter-progress__fill${remaining <= floor ? " is-over" : ""}`} />
       <span
-        className="limiter-progress__handle"
+        className={`limiter-progress__handle${armed ? "" : " is-disarmed"}`}
         role="slider"
-        tabIndex={0}
+        tabIndex={armed ? 0 : -1}
         aria-label="Stop threshold"
+        aria-disabled={!armed}
         aria-valuemin={1}
         aria-valuemax={99}
         aria-valuenow={floor}
@@ -464,7 +482,7 @@ export function UsageLimiterApp() {
             )}
           </div>
           <div className="limiter-titlebar__actions">
-            {screen === "monitor" ? enabledSwitch(true) : null}
+            {screen === "monitor" ? armedSwitch : null}
             {screen === "monitor" ? (
               <button type="button" aria-label="Open settings" onClick={openSettings}><Settings /></button>
             ) : null}
@@ -541,10 +559,18 @@ export function UsageLimiterApp() {
           ) : null}
 
           {windowMode === "pill" ? (
-            <div className="limiter-pill" data-tauri-drag-region>
+            <div
+              className="limiter-pill"
+              onMouseDown={(event) => {
+                if (event.button !== 0) return;
+                const target = event.target as HTMLElement;
+                if (target.closest("button, input, label, .limiter-progress__handle")) return;
+                void appWindow().startDragging();
+              }}
+            >
               <Shield className="limiter-pill__icon" aria-hidden="true" />
               <div className="limiter-pill__mid">
-                <div className="limiter-pill__row" data-tauri-drag-region>
+                <div className="limiter-pill__row">
                   <strong className={usageValueClass}>
                     {remaining}%<small>left</small>
                   </strong>
@@ -552,7 +578,7 @@ export function UsageLimiterApp() {
                 </div>
                 {usageBar}
               </div>
-              {enabledSwitch(true)}
+              {armedSwitch}
               <button
                 type="button"
                 className="limiter-pill__settings"
@@ -579,7 +605,7 @@ export function UsageLimiterApp() {
                 <h1>Usage limiter</h1>
                 <p>Watch Codex quota and act at your limit</p>
               </div>
-              {enabledSwitch(false)}
+              {settingsEnabledSwitch}
             </section>
 
             <section className="limiter-settings-row limiter-settings-row--threshold">

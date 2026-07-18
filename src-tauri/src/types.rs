@@ -407,6 +407,10 @@ impl Default for DrainTimeoutAction {
 pub(crate) struct QuotaGuardSettings {
     #[serde(default)]
     pub(crate) enabled: bool,
+    /// When false the guard keeps monitoring usage but suppresses every
+    /// response (notify / finish turn / interrupt).
+    #[serde(default = "default_quota_guard_armed")]
+    pub(crate) armed: bool,
     #[serde(default = "default_quota_guard_threshold")]
     pub(crate) primary_threshold_percent: u8,
     #[serde(default = "default_quota_guard_threshold")]
@@ -427,6 +431,7 @@ impl Default for QuotaGuardSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            armed: default_quota_guard_armed(),
             primary_threshold_percent: default_quota_guard_threshold(),
             secondary_threshold_percent: default_quota_guard_threshold(),
             action: QuotaAction::NotifyOnly,
@@ -438,6 +443,7 @@ impl Default for QuotaGuardSettings {
     }
 }
 
+fn default_quota_guard_armed() -> bool { true }
 fn default_quota_guard_threshold() -> u8 { 90 }
 fn default_drain_timeout_minutes() -> u16 { 15 }
 fn default_reset_grace_minutes() -> u16 { 10 }

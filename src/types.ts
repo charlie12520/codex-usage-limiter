@@ -245,6 +245,8 @@ export type DrainTimeoutAction = "notifyAndHold" | "interrupt";
 
 export type QuotaGuardSettings = {
   enabled: boolean;
+  /** false = keep tracking usage but fire no responses */
+  armed?: boolean;
   primaryThresholdPercent: number;
   secondaryThresholdPercent: number;
   action: QuotaAction;

@@ -49,6 +49,7 @@ vi.mock("@/services/tauri", () => ({
 const appSettings = {
   quotaGuard: {
     enabled: true,
+    armed: true,
     primaryThresholdPercent: 90,
     secondaryThresholdPercent: 90,
     action: "notifyOnly",
@@ -251,14 +252,28 @@ describe("UsageLimiterApp", () => {
     expect((screen.getByRole("spinbutton", { name: "Stop new work percentage" }) as HTMLInputElement).value).toBe("1");
   });
 
-  it("restores the persisted dashboard toggle when its immediate update fails", async () => {
+  it("restores the persisted armed toggle when its immediate update fails", async () => {
     vi.mocked(updateAppSettings).mockRejectedValueOnce(new Error("save rejected"));
     render(<UsageLimiterApp />);
-    const toggle = await screen.findByRole("checkbox", { name: "Limiter enabled" });
+    const toggle = await screen.findByRole("checkbox", { name: "Limiter armed" });
 
     fireEvent.click(toggle);
 
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("save rejected"));
-    expect((screen.getByRole("checkbox", { name: "Limiter enabled" }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "Limiter armed" }) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("greys out and locks the threshold grabber while disarmed", async () => {
+    vi.mocked(getAppSettings).mockResolvedValue({
+      ...appSettings,
+      quotaGuard: { ...appSettings.quotaGuard, armed: false },
+    });
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+
+    const handle = screen.getByRole("slider", { name: "Stop threshold" });
+    expect(handle.className).toContain("is-disarmed");
+    expect(handle.getAttribute("aria-disabled")).toBe("true");
+    expect(handle.getAttribute("tabindex")).toBe("-1");
   });
 });

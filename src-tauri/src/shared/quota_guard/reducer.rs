@@ -97,6 +97,11 @@ fn enter_intervention(account: &mut AccountRuntime, now_ms: i64, message: &str) 
 }
 
 fn start_episode(account: &mut AccountRuntime, episode: EpisodeKey, settings: &QuotaGuardSettings, _now_ms: i64, effects: &mut Vec<ReducerEffect>, generation: u64) {
+    if !settings.armed {
+        // Disarmed: tracking continues but no response fires. The episode is
+        // not recorded as fired, so re-arming acts on the next crossing.
+        return;
+    }
     account.fired_episodes.insert(episode.clone());
     account.episode_policy = Some(policy(settings));
     match settings.action {
