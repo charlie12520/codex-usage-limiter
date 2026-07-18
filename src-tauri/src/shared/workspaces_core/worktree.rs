@@ -15,7 +15,10 @@ use crate::types::{
     WorktreeSetupStatus,
 };
 
-use super::connect::{kill_session_by_id, take_live_shared_session, workspace_session_spawn_lock};
+use super::connect::{
+    bind_workspace_session, kill_session_by_id, take_live_shared_session,
+    workspace_session_spawn_lock,
+};
 use super::helpers::{
     copy_agents_md_from_parent_to_worktree, normalize_setup_script, workspace_path_to_string,
     worktree_setup_marker_path, AGENTS_MD_FILE_NAME,
@@ -243,10 +246,7 @@ where
         write_workspaces(storage_path, &list)?;
     }
 
-    session
-        .register_workspace_with_path(&entry.id, Some(&entry.path))
-        .await;
-    sessions.lock().await.insert(entry.id.clone(), session);
+    bind_workspace_session(sessions, session, &entry.id, Some(&entry.path)).await;
 
     Ok(WorkspaceInfo {
         id: entry.id,
@@ -507,9 +507,13 @@ where
     }
 
     if let Some(session) = sessions.lock().await.get(&entry_snapshot.id).cloned() {
-        session
-            .register_workspace_with_path(&entry_snapshot.id, Some(&entry_snapshot.path))
-            .await;
+        bind_workspace_session(
+            sessions,
+            session,
+            &entry_snapshot.id,
+            Some(&entry_snapshot.path),
+        )
+        .await;
     }
 
     let connected = sessions.lock().await.contains_key(&entry_snapshot.id);

@@ -172,7 +172,6 @@ export default function MainApp() {
     queueSaveSettings,
   });
   const {
-    isMobileRuntime,
     showMobileSetupWizard,
     mobileSetupWizardProps,
     handleMobileConnectSuccess,
@@ -182,7 +181,7 @@ export default function MainApp() {
     queueSaveSettings,
     refreshWorkspaces,
   });
-  const updaterEnabled = !isMobileRuntime;
+  const updaterEnabled = false;
 
   const workspacesById = useMemo(
     () => new Map(workspaces.map((workspace) => [workspace.id, workspace])),
@@ -461,11 +460,13 @@ export default function MainApp() {
     refreshThread,
     sendUserMessage,
     sendUserMessageToThread,
-    startFork,
     startReview,
     startUncommittedReview,
     startResume,
-    startCompact,
+    startQueuedFork,
+    startQueuedReview,
+    startQueuedCompact,
+    startQueuedNew,
     startApps,
     startMcp,
     startFast,
@@ -938,7 +939,7 @@ export default function MainApp() {
     },
   });
 
-  const { appModalsProps, modalActions } = useMainAppModals({
+  const { appModalsProps, modalActions, quotaGuard } = useMainAppModals({
     settingsViewComponent: SettingsView,
     workspaces,
     workspaceGroups,
@@ -1124,6 +1125,10 @@ export default function MainApp() {
       pauseQueuedMessagesWhenResponseRequired:
         appSettings.pauseQueuedMessagesWhenResponseRequired,
     },
+    quota: {
+      guard: quotaGuard,
+      openPanel: modalActions.openQuotaGuardPanel,
+    },
     models: {
       models,
       selectedModelId,
@@ -1141,10 +1146,11 @@ export default function MainApp() {
       sendUserMessage,
       sendUserMessageToThread,
       seedThreadCodexParams: patchThreadCodexParams,
-      startFork,
-      startReview,
       startResume,
-      startCompact,
+      startQueuedFork,
+      startQueuedReview,
+      startQueuedCompact,
+      startQueuedNew,
       startApps,
       startMcp,
       startFast,

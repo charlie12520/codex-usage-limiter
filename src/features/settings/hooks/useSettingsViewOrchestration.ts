@@ -222,6 +222,10 @@ export function useSettingsViewOrchestration({
     projectsSectionProps,
     environmentsSectionProps,
     displaySectionProps,
+    quotaGuardSectionProps: {
+      appSettings,
+      onUpdateAppSettings,
+    },
     composerSectionProps: {
       appSettings,
       optionKeyLabel,

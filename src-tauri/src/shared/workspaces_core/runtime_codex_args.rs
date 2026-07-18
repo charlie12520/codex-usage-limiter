@@ -12,7 +12,7 @@ use crate::codex::home::resolve_workspace_codex_home;
 use crate::shared::process_core::kill_child_process_tree;
 use crate::types::{AppSettings, WorkspaceEntry};
 
-use super::connect::workspace_session_spawn_lock;
+use super::connect::{swap_workspace_session, workspace_session_spawn_lock};
 use super::helpers::resolve_entry_and_parent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,12 +86,8 @@ where
     let new_session =
         spawn_session(entry.clone(), default_bin, target_args.clone(), codex_home).await?;
     let workspace_ids = {
-        let mut sessions = sessions.lock().await;
-        let keys: Vec<String> = sessions.keys().cloned().collect();
-        for key in &keys {
-            sessions.insert(key.clone(), Arc::clone(&new_session));
-        }
-        keys
+        let sessions = sessions.lock().await;
+        sessions.keys().cloned().collect::<Vec<_>>()
     };
     let workspace_paths = {
         let workspaces = workspaces.lock().await;
@@ -101,21 +97,21 @@ where
                 let path = workspaces
                     .get(workspace_id)
                     .map(|entry| entry.path.clone())
-                    .unwrap_or_default();
+                    .filter(|path| !path.is_empty());
                 (workspace_id.clone(), path)
             })
             .collect::<Vec<_>>()
     };
-    for (workspace_id, workspace_path) in &workspace_paths {
-        let path = if workspace_path.is_empty() {
-            None
-        } else {
-            Some(workspace_path.as_str())
-        };
-        new_session
-            .register_workspace_with_path(workspace_id, path)
-            .await;
-    }
+    // The old epoch is revoked for every mapping, all pre-close admissions
+    // have finished their write/registration seam, then every map entry is
+    // atomically pointed at the fresh closed epoch before it is announced.
+    swap_workspace_session(
+        sessions,
+        &current_session,
+        Arc::clone(&new_session),
+        &workspace_paths,
+    )
+    .await;
     let mut child = current_session.child.lock().await;
     kill_child_process_tree(&mut child).await;
 
@@ -180,6 +176,11 @@ mod tests {
             owner_workspace_id: "test-owner".to_string(),
             workspace_ids: Mutex::new(HashSet::from(["test-owner".to_string()])),
             workspace_roots: Mutex::new(HashMap::new()),
+            bound_workspace_ids: Mutex::new(HashSet::new()),
+            session_epoch: "test-epoch".to_string(),
+            canonical_codex_home: "test-home".to_string(),
+            quota_guard: None,
+            quota_gate: None,
         }
     }
 

@@ -5,6 +5,7 @@ import type {
   DictationModelStatus,
   TrayOpenThreadPayload,
 } from "../types";
+import type { QuotaGuardPublicState } from "@/features/quota-guard/quotaGuardTypes";
 
 export type Unsubscribe = () => void;
 
@@ -117,12 +118,30 @@ const menuComposerCycleReasoningHub = createEventHub<void>("menu-composer-cycle-
 const menuComposerCycleCollaborationHub = createEventHub<void>(
   "menu-composer-cycle-collaboration",
 );
+const quotaGuardStateHub = createEventHub<QuotaGuardPublicState>(
+  "quota-guard-state-changed",
+);
+const quotaGuardOpenPanelHub = createEventHub<void>("quota-guard-open-panel");
 
 export function subscribeAppServerEvents(
   onEvent: (event: AppServerEvent) => void,
   options?: SubscriptionOptions,
 ): Unsubscribe {
   return appServerHub.subscribe(onEvent, options);
+}
+
+export function subscribeQuotaGuardStateChanged(
+  onEvent: (state: QuotaGuardPublicState) => void,
+  options?: SubscriptionOptions,
+): Unsubscribe {
+  return quotaGuardStateHub.subscribe(onEvent, options);
+}
+
+export function subscribeQuotaGuardOpenPanel(
+  onEvent: () => void,
+  options?: SubscriptionOptions,
+): Unsubscribe {
+  return quotaGuardOpenPanelHub.subscribe(onEvent, options);
 }
 
 export function subscribeDictationDownload(

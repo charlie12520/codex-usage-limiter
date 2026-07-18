@@ -23,6 +23,7 @@ mod menu;
 mod notifications;
 mod prompts;
 mod remote_backend;
+mod quota_guard_runtime;
 mod rules;
 mod settings;
 mod shared;
@@ -116,6 +117,13 @@ pub fn run() {
         .setup(|app| {
             let state = state::AppState::load(&app.handle());
             app.manage(state);
+            {
+                let state = app.state::<state::AppState>();
+                state
+                    .quota_guard
+                    .start(app.handle().clone(), state.quota_guard_state_path.clone());
+                state.quota_guard.rehydrate();
+            }
             #[cfg(target_os = "macos")]
             {
                 let tray_state = app.state::<tray::TrayState>();
@@ -162,11 +170,6 @@ pub fn run() {
                     let _ = window::configure_ios_webview_edge_to_edge(&main_webview);
                 }
             }
-            #[cfg(desktop)]
-            {
-                app.handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())?;
-            }
             Ok(())
         });
 
@@ -183,6 +186,12 @@ pub fn run() {
             settings::get_app_settings,
             settings::update_app_settings,
             settings::get_codex_config_path,
+            quota_guard_runtime::quota_guard_get_state,
+            quota_guard_runtime::quota_guard_apply_action_now,
+            quota_guard_runtime::quota_guard_keep_waiting,
+            quota_guard_runtime::quota_guard_interrupt_now,
+            quota_guard_runtime::quota_guard_verify_now,
+            quota_guard_runtime::quota_guard_resolve_intervention,
             files::file_read,
             files::file_write,
             files::read_image_as_data_url,

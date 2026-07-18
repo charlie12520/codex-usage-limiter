@@ -14,7 +14,7 @@ export const SETTINGS_SECTION_IDS = [
   "agents",
 ] as const;
 
-export const SETTINGS_EXTRA_SECTION_IDS = ["codex", "features"] as const;
+export const SETTINGS_EXTRA_SECTION_IDS = ["codex", "features", "quota-guard"] as const;
 
 export const SETTINGS_ROUTE_SECTION_IDS = [
   ...SETTINGS_SECTION_IDS,

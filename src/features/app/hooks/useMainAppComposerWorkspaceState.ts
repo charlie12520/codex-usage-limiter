@@ -1,4 +1,4 @@
-import { useMemo, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, type RefObject } from "react";
 import type {
   AppSettings,
   ConversationItem,
@@ -10,6 +10,8 @@ import type {
   WorkspaceInfo,
 } from "@/types";
 import { computePlanFollowupState } from "@/features/messages/utils/messageRenderUtils";
+import { admissionForWorkspace } from "@/features/quota-guard/quotaGuardTypes";
+import type { QuotaGuardController } from "@/features/quota-guard/hooks/useQuotaGuardState";
 import { useComposerController } from "@app/hooks/useComposerController";
 import { useComposerInsert } from "@app/hooks/useComposerInsert";
 import { useWorkspaceFileListing } from "@app/hooks/useWorkspaceFileListing";
@@ -62,6 +64,10 @@ type UseMainAppComposerWorkspaceStateArgs = {
     selectedServiceTier: ServiceTier | null | undefined;
     collaborationModePayload: Record<string, unknown> | null;
   };
+  quota: {
+    guard: QuotaGuardController;
+    openPanel: () => void;
+  };
   refs: {
     composerInputRef: RefObject<HTMLTextAreaElement | null>;
     workspaceHomeTextareaRef: RefObject<HTMLTextAreaElement | null>;
@@ -70,18 +76,17 @@ type UseMainAppComposerWorkspaceStateArgs = {
     addWorktreeAgent: Parameters<typeof useWorkspaceHome>[0]["addWorktreeAgent"];
     connectWorkspace: Parameters<typeof useComposerController>[0]["connectWorkspace"] &
       Parameters<typeof useWorkspaceHome>[0]["connectWorkspace"];
-    startThreadForWorkspace: Parameters<typeof useComposerController>[0]["startThreadForWorkspace"] &
-      Parameters<typeof useWorkspaceHome>[0]["startThreadForWorkspace"];
+    startThreadForWorkspace: Parameters<typeof useWorkspaceHome>[0]["startThreadForWorkspace"];
     sendUserMessage: Parameters<typeof useComposerController>[0]["sendUserMessage"];
-    sendUserMessageToThread: Parameters<typeof useComposerController>[0]["sendUserMessageToThread"] &
-      Parameters<typeof useWorkspaceHome>[0]["sendUserMessageToThread"];
+    sendUserMessageToThread: Parameters<typeof useWorkspaceHome>[0]["sendUserMessageToThread"];
     seedThreadCodexParams: NonNullable<
       Parameters<typeof useWorkspaceHome>[0]["seedThreadCodexParams"]
     >;
-    startFork: Parameters<typeof useComposerController>[0]["startFork"];
-    startReview: Parameters<typeof useComposerController>[0]["startReview"];
+    startQueuedFork: Parameters<typeof useComposerController>[0]["startQueuedFork"];
+    startQueuedReview: Parameters<typeof useComposerController>[0]["startQueuedReview"];
     startResume: Parameters<typeof useComposerController>[0]["startResume"];
-    startCompact: Parameters<typeof useComposerController>[0]["startCompact"];
+    startQueuedCompact: Parameters<typeof useComposerController>[0]["startQueuedCompact"];
+    startQueuedNew: Parameters<typeof useComposerController>[0]["startQueuedNew"];
     startApps: Parameters<typeof useComposerController>[0]["startApps"];
     startMcp: Parameters<typeof useComposerController>[0]["startMcp"];
     startFast: Parameters<typeof useComposerController>[0]["startFast"];
@@ -98,6 +103,7 @@ export function useMainAppComposerWorkspaceState({
   settings,
   models,
   refs,
+  quota,
   actions,
 }: UseMainAppComposerWorkspaceStateArgs) {
   const {
@@ -138,10 +144,11 @@ export function useMainAppComposerWorkspaceState({
     sendUserMessage,
     sendUserMessageToThread,
     seedThreadCodexParams,
-    startFork,
-    startReview,
+    startQueuedFork,
+    startQueuedReview,
     startResume,
-    startCompact,
+    startQueuedCompact,
+    startQueuedNew,
     startApps,
     startMcp,
     startFast,
@@ -149,6 +156,12 @@ export function useMainAppComposerWorkspaceState({
     handleWorktreeCreated,
     addDebugEntry,
   } = actions;
+  const { guard: quotaGuard, openPanel: openQuotaGuardPanel } = quota;
+  const {
+    state: quotaGuardState,
+    queueResumeRequired,
+    requireQueueResume,
+  } = quotaGuard;
   const showWorkspaceHome = Boolean(
     activeWorkspace && !activeThreadId && !isNewAgentDraftMode,
   );
@@ -209,10 +222,28 @@ export function useMainAppComposerWorkspaceState({
     ],
   );
 
+  const quotaAdmission = admissionForWorkspace(quotaGuardState, activeWorkspaceId);
+  useEffect(() => {
+    if (!quotaAdmission.open && quotaAdmission.reason !== "workspaceUnbound") {
+      requireQueueResume();
+    }
+  }, [
+    quotaAdmission.open,
+    quotaAdmission.reason,
+    requireQueueResume,
+  ]);
+  const quotaQueuePaused =
+    !quotaAdmission.open || queueResumeRequired;
+
+  const handleQuotaGuardBlocked = useCallback(() => {
+    requireQueueResume();
+    openQuotaGuardPanel();
+  }, [openQuotaGuardPanel, requireQueueResume]);
   const queueFlushPaused = Boolean(
-    settings.pauseQueuedMessagesWhenResponseRequired &&
-      activeThreadId &&
-      (hasUserInputRequestForActiveThread || isPlanReadyAwaitingResponse),
+    quotaQueuePaused ||
+      (settings.pauseQueuedMessagesWhenResponseRequired &&
+        activeThreadId &&
+        (hasUserInputRequestForActiveThread || isPlanReadyAwaitingResponse)),
   );
 
   const queuePausedReason =
@@ -234,18 +265,24 @@ export function useMainAppComposerWorkspaceState({
     followUpMessageBehavior: settings.followUpMessageBehavior,
     appsEnabled: settings.experimentalAppsEnabled,
     connectWorkspace,
-    startThreadForWorkspace,
     sendUserMessage,
-    sendUserMessageToThread,
-    startFork,
-    startReview,
+    startQueuedFork,
+    startQueuedReview,
     startResume,
-    startCompact,
+    startQueuedCompact,
+    startQueuedNew,
     startApps,
     startMcp,
     startFast,
     startStatus,
+    onQuotaGuardBlocked: handleQuotaGuardBlocked,
   });
+
+  useEffect(() => {
+    const resume = () => composerState.resumeQueuedSends();
+    window.addEventListener("quota-guard-resume-queued-sends", resume);
+    return () => window.removeEventListener("quota-guard-resume-queued-sends", resume);
+  }, [composerState.resumeQueuedSends]);
 
   const workspaceHomeState = useWorkspaceHome({
     activeWorkspace,
@@ -325,6 +362,9 @@ export function useMainAppComposerWorkspaceState({
     recentThreadsUpdatedAt,
     workspaceHomeState,
     agentMdState,
+    quotaGuard,
+    openQuotaGuardPanel,
+    quotaAdmission,
     ...composerState,
   };
 }

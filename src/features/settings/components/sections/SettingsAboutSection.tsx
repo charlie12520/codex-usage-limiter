@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AppSettings } from "@/types";
-import {
-  getAppBuildType,
-  isMobileRuntime,
-  type AppBuildType,
-} from "@services/tauri";
+import { getAppBuildType, type AppBuildType } from "@services/tauri";
 import { useUpdater } from "@/features/update/hooks/useUpdater";
 import {
   SettingsSection,
@@ -36,7 +32,7 @@ export function SettingsAboutSection({
   onToggleAutomaticAppUpdateChecks,
 }: SettingsAboutSectionProps) {
   const [appBuildType, setAppBuildType] = useState<AppBuildType | "unknown">("unknown");
-  const [updaterEnabled, setUpdaterEnabled] = useState(false);
+  const updaterEnabled = false;
   const { state: updaterState, checkForUpdates, startUpdate } = useUpdater({
     enabled: updaterEnabled,
     autoCheckOnMount: false,
@@ -62,26 +58,6 @@ export function SettingsAboutSection({
     };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    const detectRuntime = async () => {
-      try {
-        const mobileRuntime = await isMobileRuntime();
-        if (active) {
-          setUpdaterEnabled(!mobileRuntime);
-        }
-      } catch {
-        if (active) {
-          // In non-Tauri previews we still want local desktop-like behavior.
-          setUpdaterEnabled(true);
-        }
-      }
-    };
-    void detectRuntime();
-    return () => {
-      active = false;
-    };
-  }, []);
 
   const buildDateValue = __APP_BUILD_DATE__.trim();
   const parsedBuildDate = Date.parse(buildDateValue);
@@ -112,10 +88,11 @@ export function SettingsAboutSection({
         <div className="settings-label">App Updates</div>
         <SettingsToggleRow
           title="Automatically check for app updates"
-          subtitle="When enabled, CodexMonitor checks for new app versions on launch."
+          subtitle="Updates are not configured for this standalone fork."
         >
           <SettingsToggleSwitch
             pressed={appSettings.automaticAppUpdateChecksEnabled}
+            disabled
             onClick={() => {
               onToggleAutomaticAppUpdateChecks?.();
             }}

@@ -2,21 +2,20 @@
   "app": {
     "windows": [
       {
-        "title": "Codex Monitor",
-        "width": 1200,
-        "height": 700,
-        "minWidth": 360,
-        "minHeight": 600,
+        "title": "Codex Usage Limiter",
+        "width": 640,
+        "height": 460,
+        "minWidth": 560,
+        "minHeight": 400,
         "dragDropEnabled": true,
-        "titleBarStyle": "Visible",
-        "hiddenTitle": false,
-        "transparent": true,
+        "decorations": false,
+        "transparent": false,
         "devtools": true,
         "windowEffects": null
       }
     ]
   },
   "bundle": {
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": false
   }
 }

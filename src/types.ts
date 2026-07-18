@@ -209,9 +209,10 @@ export type ThemePreference = "system" | "light" | "dark" | "dim";
 export type PersonalityPreference = "friendly" | "pragmatic";
 export type FollowUpMessageBehavior = "queue" | "steer";
 export type ComposerSendIntent = "default" | "queue" | "steer";
-export type SendMessageResult = {
-  status: "sent" | "blocked" | "steer_failed";
-};
+export type SendMessageResult =
+  | { status: "sent" }
+  | { status: "steer_failed" }
+  | { status: "blocked"; reason: "quotaGuard" | "other" };
 
 export type ComposerEditorPreset = "default" | "helpful" | "smart";
 
@@ -233,6 +234,24 @@ export type OpenAppTarget = {
   appName?: string | null;
   command?: string | null;
   args: string[];
+};
+
+export type QuotaAction =
+  | "notifyOnly"
+  | "interruptImmediately"
+  | "finishCurrentTurn";
+
+export type DrainTimeoutAction = "notifyAndHold" | "interrupt";
+
+export type QuotaGuardSettings = {
+  enabled: boolean;
+  primaryThresholdPercent: number;
+  secondaryThresholdPercent: number;
+  action: QuotaAction;
+  drainTimeoutMinutes: number;
+  drainTimeoutAction: DrainTimeoutAction;
+  resetGraceMinutes: number;
+  notifyWhenAvailable: boolean;
 };
 
 export type AppSettings = {
@@ -310,6 +329,7 @@ export type AppSettings = {
   globalWorktreesFolder: string | null;
   openAppTargets: OpenAppTarget[];
   selectedOpenAppId: string;
+  quotaGuard: QuotaGuardSettings;
 };
 
 export type CodexFeatureStage =
@@ -600,6 +620,8 @@ export type RateLimitSnapshot = {
   secondary: RateLimitWindow | null;
   credits: CreditsSnapshot | null;
   planType: string | null;
+  rateLimitReachedType?: string | null;
+  observedAt?: number | null;
 };
 
 export type AccountSnapshot = {
@@ -607,6 +629,13 @@ export type AccountSnapshot = {
   email: string | null;
   planType: string | null;
   requiresOpenaiAuth: boolean | null;
+};
+
+export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+
+export type TurnCompletionPayload = {
+  status: TurnStatus | null;
+  error: Record<string, unknown> | null;
 };
 
 export type QueuedMessage = {

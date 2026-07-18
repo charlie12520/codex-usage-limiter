@@ -539,4 +539,40 @@ describe("useAppServerEvents", () => {
       root.unmount();
     });
   });
+
+  it("preserves turn completion status and error details", async () => {
+    const handlers: Handlers = { onTurnCompleted: vi.fn() };
+    const { root } = await mount(handlers);
+
+    act(() => {
+      listener?.({
+        workspace_id: "ws-1",
+        message: {
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: {
+              id: "turn-1",
+              status: "failed",
+              error: { codexErrorInfo: "usageLimitExceeded" },
+            },
+          },
+        },
+      });
+    });
+
+    expect(handlers.onTurnCompleted).toHaveBeenCalledWith(
+      "ws-1",
+      "thread-1",
+      "turn-1",
+      {
+        status: "failed",
+        error: { codexErrorInfo: "usageLimitExceeded" },
+      },
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });

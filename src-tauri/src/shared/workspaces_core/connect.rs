@@ -25,12 +25,118 @@ async fn session_process_is_alive(session: &Arc<WorkspaceSession>) -> bool {
     matches!(child.try_wait(), Ok(None))
 }
 
+pub(crate) async fn bind_workspace_session(
+    sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    session: Arc<WorkspaceSession>,
+    workspace_id: &str,
+    workspace_path: Option<&str>,
+) {
+    let previous = {
+        let sessions = sessions.lock().await;
+        sessions.get(workspace_id).cloned()
+    };
+    if previous
+        .as_ref()
+        .is_some_and(|previous| !Arc::ptr_eq(previous, &session))
+    {
+        previous.unwrap().revoke_workspace(workspace_id).await;
+    }
+    sessions
+        .lock()
+        .await
+        .insert(workspace_id.to_string(), Arc::clone(&session));
+    session.bind_workspace(workspace_id, workspace_path).await;
+}
+
+pub(crate) async fn revoke_and_unbind_workspace(
+    sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    workspace_id: &str,
+) -> Option<Arc<WorkspaceSession>> {
+    let session = {
+        let sessions = sessions.lock().await;
+        sessions.get(workspace_id).cloned()
+    }?;
+    session.revoke_workspace(workspace_id).await;
+    let mut sessions = sessions.lock().await;
+    if sessions
+        .get(workspace_id)
+        .is_some_and(|candidate| Arc::ptr_eq(candidate, &session))
+    {
+        sessions.remove(workspace_id);
+    }
+    Some(session)
+}
+
+/// Replaces every mapping that still points at `old_session` without allowing
+/// the retired epoch to admit a new inference request.  The caller owns the
+/// spawn lock; this function deliberately does not hold the session map while
+/// revoking permits or waiting for already-admitted writes to register.
+pub(crate) async fn swap_workspace_session(
+    sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    old_session: &Arc<WorkspaceSession>,
+    new_session: Arc<WorkspaceSession>,
+    workspace_paths: &[(String, Option<String>)],
+) {
+    let replacing: Vec<(String, Option<String>)> = {
+        let sessions = sessions.lock().await;
+        workspace_paths
+            .iter()
+            .filter(|(workspace_id, _)| {
+                sessions
+                    .get(workspace_id)
+                    .is_some_and(|candidate| Arc::ptr_eq(candidate, old_session))
+            })
+            .cloned()
+            .collect()
+    };
+
+    // Revoke before changing any map entry.  A retained Arc to the old
+    // session therefore fails admission even while callers are observing the
+    // transition.
+    for (workspace_id, _) in &replacing {
+        old_session.revoke_workspace(workspace_id).await;
+    }
+    if let Some(gate) = &old_session.quota_gate {
+        while gate.active_admissions() != 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    {
+        let mut sessions = sessions.lock().await;
+        for (workspace_id, _) in &replacing {
+            // Do not overwrite a mapping that a newer serialized operation
+            // has already replaced.
+            if sessions
+                .get(workspace_id)
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, old_session))
+            {
+                sessions.insert(workspace_id.clone(), Arc::clone(&new_session));
+            }
+        }
+    }
+    for (workspace_id, workspace_path) in replacing {
+        new_session
+            .bind_workspace(&workspace_id, workspace_path.as_deref())
+            .await;
+    }
+}
+
 async fn remove_session_references(
     sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
     session: &Arc<WorkspaceSession>,
 ) {
-    let mut sessions = sessions.lock().await;
-    sessions.retain(|_, candidate| !Arc::ptr_eq(candidate, session));
+    let ids: Vec<String> = {
+        let sessions = sessions.lock().await;
+        sessions
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, session))
+            .map(|(workspace_id, _)| workspace_id.clone())
+            .collect()
+    };
+    for workspace_id in ids {
+        let _ = revoke_and_unbind_workspace(sessions, &workspace_id).await;
+    }
 }
 
 pub(super) async fn take_live_shared_session(
@@ -74,13 +180,13 @@ where
         remove_session_references(sessions, &existing_for_entry).await;
     }
     if let Some(existing_session) = take_live_shared_session(sessions).await {
-        existing_session
-            .register_workspace_with_path(&entry.id, Some(&entry.path))
-            .await;
-        sessions
-            .lock()
-            .await
-            .insert(entry.id.clone(), existing_session);
+        bind_workspace_session(
+            sessions,
+            existing_session,
+            &entry.id,
+            Some(&entry.path),
+        )
+        .await;
         return Ok(());
     }
     let (default_bin, codex_args) = {
@@ -92,10 +198,7 @@ where
     };
     let codex_home = resolve_workspace_codex_home(&entry, parent_entry.as_ref());
     let session = spawn_session(entry.clone(), default_bin, codex_args, codex_home).await?;
-    session
-        .register_workspace_with_path(&entry.id, Some(&entry.path))
-        .await;
-    sessions.lock().await.insert(entry.id, session);
+    bind_workspace_session(sessions, session, &entry.id, Some(&entry.path)).await;
     Ok(())
 }
 
@@ -103,24 +206,20 @@ pub(super) async fn kill_session_by_id(
     sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
     id: &str,
 ) {
-    let (removed, still_referenced) = {
-        let mut sessions = sessions.lock().await;
-        let removed = sessions.remove(id);
-        let still_referenced = removed.as_ref().is_some_and(|session| {
-            sessions
-                .values()
-                .any(|candidate| Arc::ptr_eq(candidate, session))
-        });
-        (removed, still_referenced)
+    let Some(removed) = revoke_and_unbind_workspace(sessions, id).await else {
+        return;
     };
-    if let Some(session) = removed {
-        session.unregister_workspace(id).await;
-        if still_referenced {
-            return;
-        }
-        let mut child = session.child.lock().await;
-        kill_child_process_tree(&mut child).await;
+    let still_referenced = {
+        let sessions = sessions.lock().await;
+        sessions
+            .values()
+            .any(|candidate| Arc::ptr_eq(candidate, &removed))
+    };
+    if still_referenced {
+        return;
     }
+    let mut child = removed.child.lock().await;
+    kill_child_process_tree(&mut child).await;
 }
 
 #[cfg(test)]
@@ -136,6 +235,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::types::{WorkspaceKind, WorkspaceSettings};
+    use crate::shared::quota_guard::gate::{ProcessGate, ProcessPolicy};
 
     fn make_workspace_entry(id: &str) -> WorkspaceEntry {
         WorkspaceEntry {
@@ -180,6 +280,11 @@ mod tests {
             owner_workspace_id: "test-owner".to_string(),
             workspace_ids: Mutex::new(HashSet::from(["test-owner".to_string()])),
             workspace_roots: Mutex::new(HashMap::new()),
+            bound_workspace_ids: Mutex::new(HashSet::new()),
+            session_epoch: "test-epoch".to_string(),
+            canonical_codex_home: "test-home".to_string(),
+            quota_guard: None,
+            quota_gate: Some(ProcessGate::default()),
         })
     }
 
@@ -232,6 +337,7 @@ mod tests {
                 entry.id.clone(),
                 &workspaces,
                 &sessions,
+
                 &app_settings,
                 move |_entry, _default_bin, _codex_args, _codex_home| {
                     let spawn_calls_ref = spawn_calls_ref.clone();
@@ -247,6 +353,121 @@ mod tests {
 
             assert_eq!(spawn_calls.load(Ordering::SeqCst), 1);
             assert!(sessions.lock().await.contains_key(&entry.id));
+            kill_session_by_id(&sessions, &entry.id).await;
+        });
+    }
+
+    #[test]
+    fn replacement_revokes_retained_old_epoch_before_mapping_fresh_closed_epoch() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let entry = make_workspace_entry("ws-replace");
+            let sessions = Mutex::new(HashMap::<String, Arc<WorkspaceSession>>::new());
+            let mut old = make_session(entry.clone());
+            Arc::get_mut(&mut old)
+                .expect("old session is not shared")
+                .session_epoch = "old-epoch".to_string();
+            let old_gate = old.quota_gate.as_ref().expect("old gate").clone();
+            old_gate.set_policy(ProcessPolicy::EnabledOpen);
+            bind_workspace_session(&sessions, Arc::clone(&old), &entry.id, Some(&entry.path))
+                .await;
+            old_gate.set_epoch_open(old.session_epoch(), &entry.id, true);
+
+            let mut fresh = make_session(entry.clone());
+            Arc::get_mut(&mut fresh)
+                .expect("fresh session is not shared")
+                .session_epoch = "fresh-epoch".to_string();
+            let fresh_gate = fresh.quota_gate.as_ref().expect("fresh gate").clone();
+            fresh_gate.set_policy(ProcessPolicy::EnabledOpen);
+
+            swap_workspace_session(
+                &sessions,
+                &old,
+                Arc::clone(&fresh),
+                &[(entry.id.clone(), Some(entry.path.clone()))],
+            )
+            .await;
+
+            assert!(!old_gate.status(Some(old.session_epoch()), &entry.id).open);
+            assert!(Arc::ptr_eq(
+                sessions
+                    .lock()
+                    .await
+                    .get(&entry.id)
+                    .expect("fresh mapping committed"),
+                &fresh
+            ));
+            assert!(fresh.is_workspace_bound(&entry.id).await);
+            assert!(!fresh_gate.status(Some(fresh.session_epoch()), &entry.id).open);
+
+            kill_session_by_id(&sessions, &entry.id).await;
+            let mut old_child = old.child.lock().await;
+            kill_child_process_tree(&mut old_child).await;
+        });
+    }
+
+    #[test]
+    fn bind_inserts_before_committing_and_is_idempotent() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let entry = make_workspace_entry("ws-bind");
+            let sessions = Mutex::new(HashMap::<String, Arc<WorkspaceSession>>::new());
+            let session = make_session(entry.clone());
+            let gate = session.quota_gate.as_ref().expect("fixture gate").clone();
+            gate.set_policy(ProcessPolicy::EnabledOpen);
+
+            bind_workspace_session(&sessions, Arc::clone(&session), &entry.id, Some(&entry.path))
+                .await;
+            assert!(Arc::ptr_eq(
+                sessions
+                    .lock()
+                    .await
+                    .get(&entry.id)
+                    .expect("session inserted before bind returns"),
+                &session
+            ));
+            assert!(session.is_workspace_bound(&entry.id).await);
+            assert!(!gate.status(Some(session.session_epoch()), &entry.id).open);
+
+            bind_workspace_session(&sessions, Arc::clone(&session), &entry.id, Some(&entry.path))
+                .await;
+            assert_eq!(session.bound_workspace_ids.lock().await.len(), 1);
+
+            gate.set_epoch_open(session.session_epoch(), &entry.id, true);
+            let removed = revoke_and_unbind_workspace(&sessions, &entry.id)
+                .await
+                .expect("bound session removed");
+            assert!(Arc::ptr_eq(&removed, &session));
+            assert!(!gate.status(Some(session.session_epoch()), &entry.id).open);
+            let mut child = session.child.lock().await;
+            kill_child_process_tree(&mut child).await;
+        });
+    }
+
+    #[test]
+    fn inference_is_blocked_before_request_registration() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let entry = make_workspace_entry("ws-blocked");
+            let sessions = Mutex::new(HashMap::<String, Arc<WorkspaceSession>>::new());
+            let session = make_session(entry.clone());
+            bind_workspace_session(&sessions, Arc::clone(&session), &entry.id, Some(&entry.path))
+                .await;
+            session
+                .quota_gate
+                .as_ref()
+                .expect("fixture gate")
+                .set_policy(ProcessPolicy::EnabledClosed);
+
+            let error = session
+                .send_request_for_workspace(
+                    &entry.id,
+                    "turn/start",
+                    serde_json::json!({ "threadId": "thread-1" }),
+                )
+                .await
+                .expect_err("closed guard blocks inference");
+            assert!(error.starts_with("QUOTA_GUARD_BLOCKED|"));
+            assert!(session.pending.lock().await.is_empty());
+            assert!(session.request_context.lock().await.is_empty());
+
             kill_session_by_id(&sessions, &entry.id).await;
         });
     }

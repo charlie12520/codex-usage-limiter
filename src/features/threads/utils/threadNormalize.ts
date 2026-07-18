@@ -308,11 +308,30 @@ export function normalizeRateLimits(
         ? raw.plan_type
         : null;
 
+  const hasRateLimitReachedTypeKey =
+    hasOwn(raw, "rateLimitReachedType") || hasOwn(raw, "rate_limit_reached_type");
+  const rateLimitReachedType =
+    typeof raw.rateLimitReachedType === "string"
+      ? raw.rateLimitReachedType
+      : typeof raw.rate_limit_reached_type === "string"
+        ? raw.rate_limit_reached_type
+        : null;
+  const hasObservedAtKey = hasOwn(raw, "observedAt") || hasOwn(raw, "observed_at");
+  const observedAt = asFiniteNumber(raw.observedAt ?? raw.observed_at);
+
+  const nextRateLimitReachedType = rateLimitReachedType ??
+    (hasRateLimitReachedTypeKey ? null : previous?.rateLimitReachedType);
+  const nextObservedAt = observedAt ?? (hasObservedAtKey ? null : previous?.observedAt);
+
   return {
     primary,
     secondary,
     credits,
     planType: planTypeValue ?? (hasPlanTypeKey ? null : previous?.planType ?? null),
+    ...(nextRateLimitReachedType !== undefined
+      ? { rateLimitReachedType: nextRateLimitReachedType ?? null }
+      : {}),
+    ...(nextObservedAt !== undefined ? { observedAt: nextObservedAt ?? null } : {}),
   };
 }
 

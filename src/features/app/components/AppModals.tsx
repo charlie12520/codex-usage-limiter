@@ -8,6 +8,11 @@ import { useWorktreePrompt } from "../../workspaces/hooks/useWorktreePrompt";
 import { useWorkspaceFromUrlPrompt } from "../../workspaces/hooks/useWorkspaceFromUrlPrompt";
 import type { BranchSwitcherState } from "../../git/hooks/useBranchSwitcher";
 import { useGitBranches } from "../../git/hooks/useGitBranches";
+import { QuotaGuardPanel } from "@/features/quota-guard/components/QuotaGuardPanel";
+import type {
+  QuotaGuardPublicState,
+  QuotaGuardResolution,
+} from "@/features/quota-guard/quotaGuardTypes";
 
 const RenameThreadPrompt = lazy(() =>
   import("../../threads/components/RenameThreadPrompt").then((module) => ({
@@ -118,6 +123,16 @@ export type AppModalsProps = {
   onCloseSettings: () => void;
   SettingsViewComponent: ComponentType<SettingsViewProps>;
   settingsProps: Omit<SettingsViewProps, "initialSection" | "onClose">;
+  quotaGuardPanelOpen: boolean;
+  quotaGuardState: QuotaGuardPublicState | null;
+  quotaGuardQueueResumeRequired: boolean;
+  onCloseQuotaGuardPanel: () => void;
+  onQuotaGuardApplyActionNow: () => Promise<unknown>;
+  onQuotaGuardKeepWaiting: () => Promise<unknown>;
+  onQuotaGuardInterruptNow: () => Promise<unknown>;
+  onQuotaGuardVerifyNow: () => Promise<unknown>;
+  onQuotaGuardResolve: (resolution: QuotaGuardResolution) => Promise<unknown>;
+  onQuotaGuardResumeQueuedSends: () => void;
 };
 
 export const AppModals = memo(function AppModals({
@@ -172,6 +187,16 @@ export const AppModals = memo(function AppModals({
   onCloseSettings,
   SettingsViewComponent,
   settingsProps,
+  quotaGuardPanelOpen,
+  quotaGuardState,
+  quotaGuardQueueResumeRequired,
+  onCloseQuotaGuardPanel,
+  onQuotaGuardApplyActionNow,
+  onQuotaGuardKeepWaiting,
+  onQuotaGuardInterruptNow,
+  onQuotaGuardVerifyNow,
+  onQuotaGuardResolve,
+  onQuotaGuardResumeQueuedSends,
 }: AppModalsProps) {
   const { branches: worktreeBranches } = useGitBranches({
     activeWorkspace: worktreePrompt?.workspace ?? null,
@@ -302,6 +327,20 @@ export const AppModals = memo(function AppModals({
           />
         </Suspense>
       )}
+      {quotaGuardPanelOpen ? (
+        <QuotaGuardPanel
+          activeWorkspaceId={activeWorkspace?.id ?? null}
+          state={quotaGuardState}
+          queueResumeRequired={quotaGuardQueueResumeRequired}
+          onClose={onCloseQuotaGuardPanel}
+          onApplyActionNow={onQuotaGuardApplyActionNow}
+          onKeepWaiting={onQuotaGuardKeepWaiting}
+          onInterruptNow={onQuotaGuardInterruptNow}
+          onVerifyNow={onQuotaGuardVerifyNow}
+          onResolve={onQuotaGuardResolve}
+          onResumeQueuedSends={onQuotaGuardResumeQueuedSends}
+        />
+      ) : null}
     </>
   );
 });

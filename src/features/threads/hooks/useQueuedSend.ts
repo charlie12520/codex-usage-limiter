@@ -7,6 +7,10 @@ import type {
   SendMessageResult,
   WorkspaceInfo,
 } from "@/types";
+import {
+  isQuotaGuardBlockedError,
+  type QueueDispatchOutcome,
+} from "@/features/quota-guard/quotaGuardTypes";
 
 type UseQueuedSendOptions = {
   activeThreadId: string | null;
@@ -19,30 +23,22 @@ type UseQueuedSendOptions = {
   appsEnabled: boolean;
   activeWorkspace: WorkspaceInfo | null;
   connectWorkspace: (workspace: WorkspaceInfo) => Promise<void>;
-  startThreadForWorkspace: (
-    workspaceId: string,
-    options?: { activate?: boolean },
-  ) => Promise<string | null>;
   sendUserMessage: (
     text: string,
     images?: string[],
     appMentions?: AppMention[],
     options?: { sendIntent?: ComposerSendIntent },
   ) => Promise<SendMessageResult>;
-  sendUserMessageToThread: (
-    workspace: WorkspaceInfo,
-    threadId: string,
-    text: string,
-    images?: string[],
-  ) => Promise<void | SendMessageResult>;
-  startFork: (text: string) => Promise<void>;
-  startReview: (text: string) => Promise<void>;
+  startQueuedFork: (text: string) => Promise<QueueDispatchOutcome>;
+  startQueuedReview: (text: string) => Promise<QueueDispatchOutcome>;
   startResume: (text: string) => Promise<void>;
-  startCompact: (text: string) => Promise<void>;
+  startQueuedCompact: (text: string) => Promise<QueueDispatchOutcome>;
+  startQueuedNew: (text: string) => Promise<QueueDispatchOutcome>;
   startApps: (text: string) => Promise<void>;
   startMcp: (text: string) => Promise<void>;
   startFast: (text: string) => Promise<void>;
   startStatus: (text: string) => Promise<void>;
+  onQuotaGuardBlocked?: () => void;
   clearActiveImages: () => void;
 };
 
@@ -61,6 +57,7 @@ type UseQueuedSendResult = {
     appMentions?: AppMention[],
   ) => Promise<void>;
   removeQueuedMessage: (threadId: string, messageId: string) => void;
+  resumeQueuedSends: () => void;
 };
 
 type SlashCommandKind =
@@ -116,17 +113,17 @@ export function useQueuedSend({
   appsEnabled,
   activeWorkspace,
   connectWorkspace,
-  startThreadForWorkspace,
   sendUserMessage,
-  sendUserMessageToThread,
-  startFork,
-  startReview,
+  startQueuedFork,
+  startQueuedReview,
   startResume,
-  startCompact,
+  startQueuedCompact,
+  startQueuedNew,
   startApps,
   startMcp,
   startFast,
   startStatus,
+  onQuotaGuardBlocked,
   clearActiveImages,
 }: UseQueuedSendOptions): UseQueuedSendResult {
   const [queuedByThread, setQueuedByThread] = useState<
@@ -135,6 +132,7 @@ export function useQueuedSend({
   const [inFlightByThread, setInFlightByThread] = useState<
     Record<string, QueuedMessage | null>
   >({});
+  const [quotaBlockedPause, setQuotaBlockedPause] = useState(false);
   const [hasStartedByThread, setHasStartedByThread] = useState<
     Record<string, boolean>
   >({});
@@ -182,59 +180,40 @@ export function useQueuedSend({
   );
 
   const runSlashCommand = useCallback(
-    async (command: SlashCommandKind, trimmed: string) => {
+    async (command: SlashCommandKind, trimmed: string): Promise<QueueDispatchOutcome> => {
       if (command === "fork") {
-        await startFork(trimmed);
-        return;
+        return startQueuedFork(trimmed);
       }
       if (command === "review") {
-        await startReview(trimmed);
-        return;
+        return startQueuedReview(trimmed);
       }
       if (command === "resume") {
         await startResume(trimmed);
-        return;
-      }
-      if (command === "compact") {
-        await startCompact(trimmed);
-        return;
-      }
-      if (command === "apps") {
+      } else if (command === "compact") {
+        return startQueuedCompact(trimmed);
+      } else if (command === "apps") {
         await startApps(trimmed);
-        return;
-      }
-      if (command === "mcp") {
+      } else if (command === "mcp") {
         await startMcp(trimmed);
-        return;
-      }
-      if (command === "fast") {
+      } else if (command === "fast") {
         await startFast(trimmed);
-        return;
-      }
-      if (command === "status") {
+      } else if (command === "status") {
         await startStatus(trimmed);
-        return;
+      } else if (command === "new") {
+        return startQueuedNew(trimmed);
       }
-      if (command === "new" && activeWorkspace) {
-        const threadId = await startThreadForWorkspace(activeWorkspace.id);
-        const rest = trimmed.replace(/^\/new\b/i, "").trim();
-        if (threadId && rest) {
-          await sendUserMessageToThread(activeWorkspace, threadId, rest, []);
-        }
-      }
+      return "accepted";
     },
     [
-      activeWorkspace,
-      sendUserMessageToThread,
-      startFork,
-      startReview,
+      startQueuedFork,
+      startQueuedReview,
       startResume,
-      startCompact,
+      startQueuedCompact,
+      startQueuedNew,
       startApps,
       startMcp,
       startFast,
       startStatus,
-      startThreadForWorkspace,
     ],
   );
 
@@ -278,7 +257,12 @@ export function useQueuedSend({
         await connectWorkspace(activeWorkspace);
       }
       if (command) {
-        await runSlashCommand(command, trimmed);
+        const outcome = await runSlashCommand(command, trimmed);
+        if (outcome === "quotaBlocked" && activeThreadId) {
+          enqueueMessage(activeThreadId, createQueuedItem(trimmed, nextImages, nextMentions));
+          setQuotaBlockedPause(true);
+          onQuotaGuardBlocked?.();
+        }
         clearActiveImages();
         return;
       }
@@ -290,7 +274,13 @@ export function useQueuedSend({
           : await sendUserMessage(trimmed, nextImages, undefined, {
           sendIntent: effectiveIntent,
           });
-      if (
+      if (sendResult.status === "blocked" && sendResult.reason === "quotaGuard") {
+        if (activeThreadId) {
+          enqueueMessage(activeThreadId, createQueuedItem(trimmed, nextImages, nextMentions));
+        }
+        setQuotaBlockedPause(true);
+        onQuotaGuardBlocked?.();
+      } else if (
         sendResult.status === "steer_failed" &&
         activeThreadId &&
         isProcessing
@@ -314,6 +304,7 @@ export function useQueuedSend({
       steerEnabled,
       runSlashCommand,
       sendUserMessage,
+      onQuotaGuardBlocked,
     ],
   );
 
@@ -378,9 +369,14 @@ export function useQueuedSend({
     isProcessing,
     isReviewing,
   ]);
-
   useEffect(() => {
-    if (!activeThreadId || isProcessing || isReviewing || queueFlushPaused) {
+    if (
+      !activeThreadId ||
+      isProcessing ||
+      isReviewing ||
+      queueFlushPaused ||
+      quotaBlockedPause
+    ) {
       return;
     }
     if (inFlightByThread[activeThreadId]) {
@@ -402,20 +398,33 @@ export function useQueuedSend({
       try {
         const trimmed = nextItem.text.trim();
         const command = parseSlashCommand(trimmed, appsEnabled);
-        if (command) {
-          await runSlashCommand(command, trimmed);
-        } else {
-          const queuedMentions = nextItem.appMentions ?? [];
-          if (queuedMentions.length > 0) {
-            await sendUserMessage(nextItem.text, nextItem.images ?? [], queuedMentions);
-          } else {
-            await sendUserMessage(nextItem.text, nextItem.images ?? []);
-          }
+        const outcome = command
+          ? await runSlashCommand(command, trimmed)
+          : await (async (): Promise<QueueDispatchOutcome> => {
+              const queuedMentions = nextItem.appMentions ?? [];
+              const result =
+                queuedMentions.length > 0
+                  ? await sendUserMessage(nextItem.text, nextItem.images ?? [], queuedMentions)
+                  : await sendUserMessage(nextItem.text, nextItem.images ?? []);
+              return result.status === "blocked" && result.reason === "quotaGuard"
+                ? "quotaBlocked"
+                : "accepted";
+            })();
+        if (outcome === "quotaBlocked") {
+          setInFlightByThread((prev) => ({ ...prev, [threadId]: null }));
+          setHasStartedByThread((prev) => ({ ...prev, [threadId]: false }));
+          setQuotaBlockedPause(true);
+          prependQueuedMessage(threadId, nextItem);
+          onQuotaGuardBlocked?.();
         }
-      } catch {
+      } catch (error) {
         setInFlightByThread((prev) => ({ ...prev, [threadId]: null }));
         setHasStartedByThread((prev) => ({ ...prev, [threadId]: false }));
         prependQueuedMessage(threadId, nextItem);
+        if (isQuotaGuardBlockedError(error)) {
+          setQuotaBlockedPause(true);
+          onQuotaGuardBlocked?.();
+        }
       }
     })();
   }, [
@@ -429,6 +438,8 @@ export function useQueuedSend({
     queuedByThread,
     runSlashCommand,
     sendUserMessage,
+    quotaBlockedPause,
+    onQuotaGuardBlocked,
   ]);
 
   return {
@@ -437,5 +448,6 @@ export function useQueuedSend({
     handleSend,
     queueMessage,
     removeQueuedMessage,
+    resumeQueuedSends: () => setQuotaBlockedPause(false),
   };
 }

@@ -2,7 +2,11 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings, CodexDoctorResult } from "@/types";
-import { useAppSettings } from "./useAppSettings";
+import {
+  buildDefaultSettings,
+  normalizeAppSettings,
+  useAppSettings,
+} from "./useAppSettings";
 import {
   getAppSettings,
   runCodexDoctor,
@@ -27,6 +31,23 @@ describe("useAppSettings", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("defaults and normalizes quota guard settings from older files", () => {
+    const defaults = buildDefaultSettings();
+    expect(defaults.quotaGuard).toEqual({
+      enabled: false,
+      primaryThresholdPercent: 90,
+      secondaryThresholdPercent: 90,
+      action: "notifyOnly",
+      drainTimeoutMinutes: 15,
+      drainTimeoutAction: "notifyAndHold",
+      resetGraceMinutes: 10,
+      notifyWhenAvailable: true,
+    });
+    expect(
+      normalizeAppSettings({ ...defaults, quotaGuard: undefined as never }).quotaGuard,
+    ).toEqual(defaults.quotaGuard);
   });
 
   it("loads settings and normalizes theme + uiScale", async () => {

@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn restart_required_for_old_version() {
-        let info = daemon_info("0.1.0");
+        let info = daemon_info("0.0.0");
         assert!(should_restart_daemon(Some(&info)));
     }
 

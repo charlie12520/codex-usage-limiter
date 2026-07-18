@@ -44,9 +44,9 @@ export function AboutView() {
           <img
             className="about-icon"
             src="/app-icon.png"
-            alt="Codex Monitor icon"
+            alt="Codex Quota Guard icon"
           />
-          <div className="about-title">Codex Monitor</div>
+          <div className="about-title">Codex Quota Guard</div>
         </div>
         <div className="about-version">
           {version ? `Version ${version}` : "Version —"}

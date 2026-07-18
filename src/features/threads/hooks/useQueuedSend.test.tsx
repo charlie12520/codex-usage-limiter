@@ -24,13 +24,12 @@ const makeOptions = (
   appsEnabled: true,
   activeWorkspace: workspace,
   connectWorkspace: vi.fn().mockResolvedValue(undefined),
-  startThreadForWorkspace: vi.fn().mockResolvedValue("thread-1"),
   sendUserMessage: vi.fn().mockResolvedValue({ status: "sent" }),
-  sendUserMessageToThread: vi.fn().mockResolvedValue(undefined),
-  startFork: vi.fn().mockResolvedValue(undefined),
-  startReview: vi.fn().mockResolvedValue(undefined),
+  startQueuedFork: vi.fn().mockResolvedValue("accepted"),
+  startQueuedReview: vi.fn().mockResolvedValue("accepted"),
   startResume: vi.fn().mockResolvedValue(undefined),
-  startCompact: vi.fn().mockResolvedValue(undefined),
+  startQueuedCompact: vi.fn().mockResolvedValue("accepted"),
+  startQueuedNew: vi.fn().mockResolvedValue("accepted"),
   startApps: vi.fn().mockResolvedValue(undefined),
   startMcp: vi.fn().mockResolvedValue(undefined),
   startFast: vi.fn().mockResolvedValue(undefined),
@@ -76,6 +75,25 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).toHaveBeenLastCalledWith("Second", []);
   });
 
+  it("does not flush a paused queue until an explicit resume clears the pause", async () => {
+    const options = makeOptions({ queueFlushPaused: true });
+    const { result, rerender } = renderHook((props) => useQueuedSend(props), {
+      initialProps: options,
+    });
+
+    await act(async () => {
+      await result.current.queueMessage("Wait for approval");
+      await Promise.resolve();
+    });
+    expect(options.sendUserMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rerender({ ...options, queueFlushPaused: false });
+      await Promise.resolve();
+    });
+    expect(options.sendUserMessage).toHaveBeenCalledWith("Wait for approval", []);
+  });
+
   it("waits for processing to start before sending the next queued message", async () => {
     const options = makeOptions();
     const { result } = renderHook((props) => useQueuedSend(props), {
@@ -108,6 +126,50 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).not.toHaveBeenCalled();
     expect(result.current.activeQueue).toHaveLength(1);
     expect(result.current.activeQueue[0]?.text).toBe("Queued");
+  });
+
+  it("retains only quota-blocked sends and latches the queue", async () => {
+    const onQuotaGuardBlocked = vi.fn();
+    const quotaOptions = makeOptions({
+      sendUserMessage: vi.fn().mockResolvedValue({
+        status: "blocked",
+        reason: "quotaGuard",
+      }),
+      onQuotaGuardBlocked,
+    });
+    const { result } = renderHook((props) => useQueuedSend(props), {
+      initialProps: quotaOptions,
+    });
+
+    await act(async () => {
+      await result.current.handleSend("Keep this message");
+    });
+
+    expect(result.current.activeQueue.map((entry) => entry.text)).toEqual([
+      "Keep this message",
+    ]);
+    expect(onQuotaGuardBlocked).toHaveBeenCalledOnce();
+  });
+
+  it("does not latch ordinary blocked sends", async () => {
+    const onQuotaGuardBlocked = vi.fn();
+    const options = makeOptions({
+      sendUserMessage: vi.fn().mockResolvedValue({
+        status: "blocked",
+        reason: "other",
+      }),
+      onQuotaGuardBlocked,
+    });
+    const { result } = renderHook((props) => useQueuedSend(props), {
+      initialProps: options,
+    });
+
+    await act(async () => {
+      await result.current.handleSend("Do not retain");
+    });
+
+    expect(result.current.activeQueue).toEqual([]);
+    expect(onQuotaGuardBlocked).not.toHaveBeenCalled();
   });
 
   it("sends immediately while processing when steer is enabled", async () => {
@@ -300,8 +362,8 @@ describe("useQueuedSend", () => {
       await Promise.resolve();
     });
 
-    expect(options.startReview).toHaveBeenCalledTimes(1);
-    expect(options.startReview).toHaveBeenCalledWith("/review check this");
+    expect(options.startQueuedReview).toHaveBeenCalledTimes(1);
+    expect(options.startQueuedReview).toHaveBeenCalledWith("/review check this");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -324,10 +386,9 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).toHaveBeenCalledWith("After review", []);
   });
 
-  it("starts a new thread for /new and sends the remaining text there", async () => {
-    const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-2");
-    const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startThreadForWorkspace, sendUserMessageToThread });
+  it("routes /new through its quota-aware queue adapter", async () => {
+    const startQueuedNew = vi.fn().mockResolvedValue("accepted");
+    const options = makeOptions({ startQueuedNew });
     const { result } = renderHook((props) => useQueuedSend(props), {
       initialProps: options,
     });
@@ -336,30 +397,7 @@ describe("useQueuedSend", () => {
       await result.current.handleSend("/new hello there", ["img-1"]);
     });
 
-    expect(startThreadForWorkspace).toHaveBeenCalledWith("workspace-1");
-    expect(sendUserMessageToThread).toHaveBeenCalledWith(
-      workspace,
-      "thread-2",
-      "hello there",
-      [],
-    );
-    expect(options.sendUserMessage).not.toHaveBeenCalled();
-  });
-
-  it("starts a new thread for bare /new without sending a message", async () => {
-    const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-3");
-    const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startThreadForWorkspace, sendUserMessageToThread });
-    const { result } = renderHook((props) => useQueuedSend(props), {
-      initialProps: options,
-    });
-
-    await act(async () => {
-      await result.current.handleSend("/new");
-    });
-
-    expect(startThreadForWorkspace).toHaveBeenCalledWith("workspace-1");
-    expect(sendUserMessageToThread).not.toHaveBeenCalled();
+    expect(startQueuedNew).toHaveBeenCalledWith("/new hello there");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
   });
 
@@ -376,7 +414,7 @@ describe("useQueuedSend", () => {
 
     expect(startStatus).toHaveBeenCalledWith("/status now");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
   it("routes /fast to the fast-mode handler", async () => {
@@ -392,7 +430,7 @@ describe("useQueuedSend", () => {
 
     expect(startFast).toHaveBeenCalledWith("/fast on");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
   it("routes /mcp to the MCP handler", async () => {
@@ -408,7 +446,7 @@ describe("useQueuedSend", () => {
 
     expect(startMcp).toHaveBeenCalledWith("/mcp now");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
   it("routes /apps to the apps handler", async () => {
@@ -424,7 +462,7 @@ describe("useQueuedSend", () => {
 
     expect(startApps).toHaveBeenCalledWith("/apps now");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
   it("treats /apps as plain text when apps feature is disabled", async () => {
@@ -460,12 +498,12 @@ describe("useQueuedSend", () => {
 
     expect(startResume).toHaveBeenCalledWith("/resume now");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
-  it("routes /compact to the compact handler", async () => {
-    const startCompact = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startCompact });
+  it("routes /compact through the quota-aware queue adapter", async () => {
+    const startQueuedCompact = vi.fn().mockResolvedValue("accepted");
+    const options = makeOptions({ startQueuedCompact });
     const { result } = renderHook((props) => useQueuedSend(props), {
       initialProps: options,
     });
@@ -474,14 +512,14 @@ describe("useQueuedSend", () => {
       await result.current.handleSend("/compact now", ["img-1"]);
     });
 
-    expect(startCompact).toHaveBeenCalledWith("/compact now");
+    expect(startQueuedCompact).toHaveBeenCalledWith("/compact now");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
-  it("routes /fork to the fork handler", async () => {
-    const startFork = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startFork });
+  it("routes /fork through the quota-aware queue adapter", async () => {
+    const startQueuedFork = vi.fn().mockResolvedValue("accepted");
+    const options = makeOptions({ startQueuedFork });
     const { result } = renderHook((props) => useQueuedSend(props), {
       initialProps: options,
     });
@@ -490,9 +528,9 @@ describe("useQueuedSend", () => {
       await result.current.handleSend("/fork branch here", ["img-1"]);
     });
 
-    expect(startFork).toHaveBeenCalledWith("/fork branch here");
+    expect(startQueuedFork).toHaveBeenCalledWith("/fork branch here");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
-    expect(options.startReview).not.toHaveBeenCalled();
+    expect(options.startQueuedReview).not.toHaveBeenCalled();
   });
 
   it("does not send when reviewing even if steer is enabled", async () => {

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { ComponentType } from "react";
 import type {
   AppSettings,
@@ -20,6 +20,10 @@ import { useInitGitRepoPrompt } from "@/features/git/hooks/useInitGitRepoPrompt"
 import type { InitGitRepoOutcome } from "@/features/git/hooks/useGitActions";
 import { useWorktreePrompt } from "@/features/workspaces/hooks/useWorktreePrompt";
 import { useClonePrompt } from "@/features/workspaces/hooks/useClonePrompt";
+import {
+  useQuotaGuardState,
+  type QuotaGuardController,
+} from "@/features/quota-guard/hooks/useQuotaGuardState";
 
 type GroupedWorkspaceInfo = SettingsViewProps["groupedWorkspaces"];
 
@@ -136,6 +140,7 @@ type UseMainAppModalsArgs = {
 
 type UseMainAppModalsResult = {
   appModalsProps: AppModalsProps;
+  quotaGuard: QuotaGuardController;
   modalActions: {
     openSettings: (section?: SettingsSection) => void;
     closeSettings: () => void;
@@ -146,6 +151,8 @@ type UseMainAppModalsResult = {
     openWorkspaceFromUrlPrompt: () => void;
     openBranchSwitcher: () => void;
     closeBranchSwitcher: () => void;
+    openQuotaGuardPanel: () => void;
+    closeQuotaGuardPanel: () => void;
   };
 };
 
@@ -258,6 +265,16 @@ type BuildAppModalsPropsArgs = {
   onCloseSettings: () => void;
   settingsViewComponent: ComponentType<SettingsViewProps>;
   settingsViewProps: Omit<SettingsViewProps, "initialSection" | "onClose">;
+  quotaGuardPanelOpen: boolean;
+  quotaGuardState: AppModalsProps["quotaGuardState"];
+  quotaGuardQueueResumeRequired: boolean;
+  onCloseQuotaGuardPanel: () => void;
+  onQuotaGuardApplyActionNow: AppModalsProps["onQuotaGuardApplyActionNow"];
+  onQuotaGuardKeepWaiting: AppModalsProps["onQuotaGuardKeepWaiting"];
+  onQuotaGuardInterruptNow: AppModalsProps["onQuotaGuardInterruptNow"];
+  onQuotaGuardVerifyNow: AppModalsProps["onQuotaGuardVerifyNow"];
+  onQuotaGuardResolve: AppModalsProps["onQuotaGuardResolve"];
+  onQuotaGuardResumeQueuedSends: () => void;
 };
 
 function buildAppModalsProps({
@@ -305,6 +322,16 @@ function buildAppModalsProps({
   onCloseSettings,
   settingsViewComponent,
   settingsViewProps,
+  quotaGuardPanelOpen,
+  quotaGuardState,
+  quotaGuardQueueResumeRequired,
+  onCloseQuotaGuardPanel,
+  onQuotaGuardApplyActionNow,
+  onQuotaGuardKeepWaiting,
+  onQuotaGuardInterruptNow,
+  onQuotaGuardVerifyNow,
+  onQuotaGuardResolve,
+  onQuotaGuardResumeQueuedSends,
 }: BuildAppModalsPropsArgs): AppModalsProps {
   return {
     renamePrompt,
@@ -351,6 +378,16 @@ function buildAppModalsProps({
     onCloseSettings,
     SettingsViewComponent: settingsViewComponent,
     settingsProps: settingsViewProps,
+    quotaGuardPanelOpen,
+    quotaGuardState,
+    quotaGuardQueueResumeRequired,
+    onCloseQuotaGuardPanel,
+    onQuotaGuardApplyActionNow,
+    onQuotaGuardKeepWaiting,
+    onQuotaGuardInterruptNow,
+    onQuotaGuardVerifyNow,
+    onQuotaGuardResolve,
+    onQuotaGuardResumeQueuedSends,
   };
 }
 
@@ -375,6 +412,17 @@ export function useMainAppModals({
     openSettings,
     closeSettings,
   } = useSettingsModalState();
+  const [quotaGuardPanelOpen, setQuotaGuardPanelOpen] = useState(false);
+  const openQuotaGuardPanel = useCallback(() => setQuotaGuardPanelOpen(true), []);
+  const closeQuotaGuardPanel = useCallback(() => setQuotaGuardPanelOpen(false), []);
+  const quotaGuard = useQuotaGuardState(openQuotaGuardPanel);
+  const { resumeQueuedSends } = quotaGuard;
+  const resumeQuotaGuardQueue = useCallback(() => {
+    if (resumeQueuedSends(activeWorkspace?.id ?? null)) {
+      window.dispatchEvent(new Event("quota-guard-resume-queued-sends"));
+    }
+  }, [activeWorkspace?.id, resumeQueuedSends]);
+
 
   const {
     renamePrompt,
@@ -517,6 +565,16 @@ export function useMainAppModals({
         onCloseSettings: closeSettings,
         settingsViewComponent,
         settingsViewProps,
+        quotaGuardPanelOpen,
+        quotaGuardState: quotaGuard.state,
+        quotaGuardQueueResumeRequired: quotaGuard.queueResumeRequired,
+        onCloseQuotaGuardPanel: closeQuotaGuardPanel,
+        onQuotaGuardApplyActionNow: quotaGuard.applyActionNow,
+        onQuotaGuardKeepWaiting: quotaGuard.keepWaiting,
+        onQuotaGuardInterruptNow: quotaGuard.interruptNow,
+        onQuotaGuardVerifyNow: quotaGuard.verifyNow,
+        onQuotaGuardResolve: quotaGuard.resolveIntervention,
+        onQuotaGuardResumeQueuedSends: resumeQuotaGuardQueue,
       }),
     [
       activeWorkspace,
@@ -529,6 +587,7 @@ export function useMainAppModals({
       clonePrompt,
       closeBranchSwitcher,
       closeSettings,
+      closeQuotaGuardPanel,
       confirmClonePrompt,
       confirmWorktreePrompt,
       currentBranch,
@@ -549,6 +608,15 @@ export function useMainAppModals({
       settingsOpen,
       settingsSection,
       settingsViewComponent,
+      quotaGuard.applyActionNow,
+      quotaGuard.interruptNow,
+      quotaGuard.keepWaiting,
+      quotaGuard.queueResumeRequired,
+      quotaGuard.resolveIntervention,
+      quotaGuard.state,
+      quotaGuard.verifyNow,
+      quotaGuardPanelOpen,
+      resumeQuotaGuardQueue,
       settingsViewProps,
       updateCloneCopyName,
       workspacePrompts,
@@ -564,6 +632,7 @@ export function useMainAppModals({
 
   return {
     appModalsProps,
+    quotaGuard,
     modalActions: {
       openSettings,
       closeSettings,
@@ -574,6 +643,8 @@ export function useMainAppModals({
       openWorkspaceFromUrlPrompt: workspacePrompts.openWorkspaceFromUrlPrompt,
       openBranchSwitcher,
       closeBranchSwitcher,
+      openQuotaGuardPanel,
+      closeQuotaGuardPanel,
     },
   };
 }

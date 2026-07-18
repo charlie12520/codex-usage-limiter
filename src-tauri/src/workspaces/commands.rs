@@ -585,6 +585,25 @@ pub(crate) async fn update_workspace_settings(
     .await
 }
 
+/// Local-only connection adapter used by quota-guard recovery.  It intentionally
+/// bypasses the public command's remote branch: version one has no daemon actor.
+pub(crate) async fn connect_workspace_local(
+    app: &AppHandle,
+    state: &AppState,
+    id: String,
+) -> Result<(), String> {
+    workspaces_core::connect_workspace_core(
+        id,
+        &state.workspaces,
+        &state.sessions,
+        &state.app_settings,
+        |entry, default_bin, codex_args, codex_home| {
+            spawn_with_app(app, entry, default_bin, codex_args, codex_home)
+        },
+    )
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn connect_workspace(
     id: String,
@@ -603,16 +622,7 @@ pub(crate) async fn connect_workspace(
         return Ok(());
     }
 
-    workspaces_core::connect_workspace_core(
-        id,
-        &state.workspaces,
-        &state.sessions,
-        &state.app_settings,
-        |entry, default_bin, codex_args, codex_home| {
-            spawn_with_app(&app, entry, default_bin, codex_args, codex_home)
-        },
-    )
-    .await
+    connect_workspace_local(&app, &state, id).await
 }
 
 #[tauri::command]

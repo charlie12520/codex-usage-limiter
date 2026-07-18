@@ -28,6 +28,73 @@ const DEFAULT_REMOTE_BACKEND_ID = "remote-default";
 const DEFAULT_REMOTE_BACKEND_NAME = "Primary remote";
 const DEFAULT_REMOTE_PROVIDER: AppSettings["remoteBackendProvider"] = "tcp";
 
+const DEFAULT_QUOTA_GUARD_SETTINGS: AppSettings["quotaGuard"] = {
+  enabled: false,
+  primaryThresholdPercent: 90,
+  secondaryThresholdPercent: 90,
+  action: "notifyOnly",
+  drainTimeoutMinutes: 15,
+  drainTimeoutAction: "notifyAndHold",
+  resetGraceMinutes: 10,
+  notifyWhenAvailable: true,
+};
+
+function normalizeInteger(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+    ? value
+    : fallback;
+}
+
+function normalizeQuotaGuardSettings(value: unknown): AppSettings["quotaGuard"] {
+  const settings =
+    value && typeof value === "object"
+      ? (value as Partial<AppSettings["quotaGuard"]>)
+      : {};
+  return {
+    enabled: settings.enabled === true,
+    primaryThresholdPercent: normalizeInteger(
+      settings.primaryThresholdPercent,
+      DEFAULT_QUOTA_GUARD_SETTINGS.primaryThresholdPercent,
+      0,
+      100,
+    ),
+    secondaryThresholdPercent: normalizeInteger(
+      settings.secondaryThresholdPercent,
+      DEFAULT_QUOTA_GUARD_SETTINGS.secondaryThresholdPercent,
+      0,
+      100,
+    ),
+    action:
+      settings.action === "interruptImmediately" ||
+      settings.action === "finishCurrentTurn"
+        ? settings.action
+        : "notifyOnly",
+    drainTimeoutMinutes: normalizeInteger(
+      settings.drainTimeoutMinutes,
+      DEFAULT_QUOTA_GUARD_SETTINGS.drainTimeoutMinutes,
+      1,
+      1440,
+    ),
+    drainTimeoutAction:
+      settings.drainTimeoutAction === "interrupt" ? "interrupt" : "notifyAndHold",
+    resetGraceMinutes: normalizeInteger(
+      settings.resetGraceMinutes,
+      DEFAULT_QUOTA_GUARD_SETTINGS.resetGraceMinutes,
+      0,
+      1440,
+    ),
+    notifyWhenAvailable: settings.notifyWhenAvailable !== false,
+  };
+}
+
 type RemoteBackendTarget = AppSettings["remoteBackends"][number];
 
 function normalizeRemoteProvider(value: unknown): AppSettings["remoteBackendProvider"] {
@@ -122,7 +189,7 @@ function normalizeRemoteBackends(settings: AppSettings): {
   };
 }
 
-function buildDefaultSettings(): AppSettings {
+export function buildDefaultSettings(): AppSettings {
   const isMac = isMacPlatform();
   const isMobile = isMobilePlatform();
   const defaultRemote: RemoteBackendTarget = {
@@ -171,7 +238,7 @@ function buildDefaultSettings(): AppSettings {
     showMessageFilePath: true,
     chatHistoryScrollbackItems: CHAT_SCROLLBACK_DEFAULT,
     threadTitleAutogenerationEnabled: false,
-    automaticAppUpdateChecksEnabled: true,
+    automaticAppUpdateChecksEnabled: false,
     uiFontFamily: DEFAULT_UI_FONT_FAMILY,
     codeFontFamily: DEFAULT_CODE_FONT_FAMILY,
     codeFontSize: CODE_FONT_SIZE_DEFAULT,
@@ -208,10 +275,11 @@ function buildDefaultSettings(): AppSettings {
     openAppTargets: DEFAULT_OPEN_APP_TARGETS,
     selectedOpenAppId: DEFAULT_OPEN_APP_ID,
     globalWorktreesFolder: null,
+    quotaGuard: DEFAULT_QUOTA_GUARD_SETTINGS,
   };
 }
 
-function normalizeAppSettings(settings: AppSettings): AppSettings {
+export function normalizeAppSettings(settings: AppSettings): AppSettings {
   const remoteBackendSettings = normalizeRemoteBackends(settings);
   const normalizedTargets =
     settings.openAppTargets && settings.openAppTargets.length
@@ -276,6 +344,7 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     commitMessagePrompt,
     openAppTargets: normalizedTargets,
     selectedOpenAppId,
+    quotaGuard: normalizeQuotaGuardSettings(settings.quotaGuard),
   };
 }
 

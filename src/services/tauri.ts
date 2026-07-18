@@ -28,6 +28,10 @@ import type {
   GitLogResponse,
   ReviewTarget,
 } from "../types";
+import type {
+  QuotaGuardPublicState,
+  QuotaGuardResolution,
+} from "@/features/quota-guard/quotaGuardTypes";
 
 function isMissingTauriInvokeError(error: unknown) {
   return (
@@ -871,6 +875,34 @@ export async function isMobileRuntime(): Promise<boolean> {
 
 export async function updateAppSettings(settings: AppSettings): Promise<AppSettings> {
   return invoke<AppSettings>("update_app_settings", { settings });
+}
+
+export async function quotaGuardGetState(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_get_state");
+}
+
+export async function quotaGuardApplyActionNow(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_apply_action_now");
+}
+
+export async function quotaGuardKeepWaiting(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_keep_waiting");
+}
+
+export async function quotaGuardInterruptNow(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_interrupt_now");
+}
+
+export async function quotaGuardVerifyNow(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_verify_now");
+}
+
+export async function quotaGuardResolveIntervention(
+  resolution: QuotaGuardResolution,
+): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_resolve_intervention", {
+    resolution,
+  });
 }
 
 export async function tailscaleStatus(): Promise<TailscaleStatus> {

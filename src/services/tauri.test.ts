@@ -53,6 +53,7 @@ import {
   generateAgentDescription,
   writeAgentConfigToml,
   writeAgentMd,
+  quotaGuardResolveIntervention,
 } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -490,6 +491,21 @@ describe("tauri invoke wrappers", () => {
     expect(invokeMock).toHaveBeenCalledWith("tailscale_daemon_start");
     expect(invokeMock).toHaveBeenCalledWith("tailscale_daemon_stop");
     expect(invokeMock).toHaveBeenCalledWith("tailscale_daemon_status");
+  });
+
+  it("uses semantic durable resolutions for quota intervention", async () => {
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockResolvedValue(undefined);
+
+    await quotaGuardResolveIntervention("disableGuard");
+    await quotaGuardResolveIntervention("retryClosed");
+
+    expect(invokeMock).toHaveBeenCalledWith("quota_guard_resolve_intervention", {
+      resolution: "disableGuard",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("quota_guard_resolve_intervention", {
+      resolution: "retryClosed",
+    });
   });
 
   it("reads agent.md for a workspace", async () => {

@@ -38,6 +38,7 @@ import { useThreadRows } from "../hooks/useThreadRows";
 import { useDebouncedValue } from "../../../hooks/useDebouncedValue";
 import { getUsageLabels } from "../utils/usageLabels";
 import { formatRelativeTimeShort } from "../../../utils/time";
+import type { QuotaGuardPublicState } from "@/features/quota-guard/quotaGuardTypes";
 import type { ThreadStatusById } from "../../../utils/threadStatus";
 
 const COLLAPSED_GROUPS_STORAGE_KEY = "codexmonitor.collapsedGroups";
@@ -127,6 +128,8 @@ type SidebarProps = {
   onOpenSettings: () => void;
   onOpenDebug: () => void;
   showDebugButton: boolean;
+  quotaGuardState?: QuotaGuardPublicState | null;
+  onOpenQuotaGuardPanel?: () => void;
   onAddWorkspace: () => void;
   onSelectHome: () => void;
   onSelectWorkspace: (id: string) => void;
@@ -188,6 +191,8 @@ export const Sidebar = memo(function Sidebar({
   onOpenSettings,
   onOpenDebug,
   showDebugButton,
+  quotaGuardState,
+  onOpenQuotaGuardPanel,
   onAddWorkspace,
   onSelectHome,
   onSelectWorkspace,
@@ -1045,6 +1050,8 @@ export const Sidebar = memo(function Sidebar({
         accountCancelDisabled={accountCancelDisabled}
         onSwitchAccount={onSwitchAccount}
         onCancelSwitchAccount={onCancelSwitchAccount}
+        quotaGuardState={quotaGuardState}
+        onOpenQuotaGuardPanel={onOpenQuotaGuardPanel}
       />
     </aside>
   );

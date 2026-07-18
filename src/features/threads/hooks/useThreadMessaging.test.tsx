@@ -782,4 +782,55 @@ describe("useThreadMessaging telemetry", () => {
       "Review abcdef1: Tighten sidebar commit…",
     );
   });
+
+  it("reports quota-only outcomes through real queued review, compact, fork, and new adapters", async () => {
+    const pushThreadErrorMessage = vi.fn();
+    vi.mocked(compactThreadService).mockRejectedValueOnce(
+      new Error("QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1"),
+    );
+    vi.mocked(startReviewService).mockResolvedValueOnce({
+      error: { message: "QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1" },
+    } as never);
+    vi.mocked(sendUserMessageService).mockRejectedValue(
+      new Error("QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1"),
+    );
+    const { result } = renderHook(() =>
+      useThreadMessaging({
+        activeWorkspace: workspace,
+        activeThreadId: "thread-1",
+        accessMode: "current",
+        model: null,
+        effort: null,
+        collaborationMode: null,
+        reviewDeliveryMode: "inline",
+        steerEnabled: false,
+        customPrompts: [],
+        threadStatusById: {},
+        activeTurnIdByThread: {},
+        rateLimitsByWorkspace: {},
+        pendingInterruptsRef: { current: new Set<string>() },
+        dispatch: vi.fn(),
+        getCustomName: vi.fn(() => undefined),
+        markProcessing: vi.fn(),
+        markReviewing: vi.fn(),
+        setActiveTurnId: vi.fn(),
+        recordThreadActivity: vi.fn(),
+        safeMessageActivity: vi.fn(),
+        onDebug: vi.fn(),
+        pushThreadErrorMessage,
+        ensureThreadForActiveWorkspace: vi.fn(async () => "thread-1"),
+        startThreadForWorkspace: vi.fn(async () => "thread-new"),
+        ensureThreadForWorkspace: vi.fn(async () => "thread-1"),
+        refreshThread: vi.fn(async () => null),
+        forkThreadForWorkspace: vi.fn(async () => "thread-fork"),
+        updateThreadParent: vi.fn(),
+      }),
+    );
+
+    await expect(result.current.startQueuedCompact("/compact")).resolves.toBe("quotaBlocked");
+    await expect(result.current.startQueuedReview("/review uncommitted")).resolves.toBe("quotaBlocked");
+    await expect(result.current.startQueuedFork("/fork continue")).resolves.toBe("quotaBlocked");
+    await expect(result.current.startQueuedNew("/new continue")).resolves.toBe("quotaBlocked");
+    expect(pushThreadErrorMessage).not.toHaveBeenCalled();
+  });
 });

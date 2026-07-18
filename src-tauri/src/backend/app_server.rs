@@ -14,13 +14,18 @@ use tokio::time::timeout;
 
 use crate::backend::events::{AppServerEvent, EventSink};
 use crate::codex::args::parse_codex_args;
+use crate::codex::home::resolve_default_codex_home;
 use crate::shared::process_core::{kill_child_process_tree, tokio_command};
+use crate::shared::quota_guard::coordinator::{QuotaGuardEvent, QuotaGuardEventSink};
+use crate::shared::quota_guard::gate::{AdmissionReason, ProcessGate, ProcessPolicy};
 use crate::types::WorkspaceEntry;
 
 #[cfg(target_os = "windows")]
 use crate::shared::process_core::{build_cmd_c_command, resolve_windows_executable};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 fn extract_thread_id(value: &Value) -> Option<String> {
     fn extract_from_container(container: Option<&Value>) -> Option<String> {
@@ -41,6 +46,30 @@ fn extract_thread_id(value: &Value) -> Option<String> {
 
     extract_from_container(value.get("params"))
         .or_else(|| extract_from_container(value.get("result")))
+}
+
+fn extract_turn_id(value: &Value) -> Option<String> {
+    let containers = [value.get("params"), value.get("result")];
+    containers.into_iter().flatten().find_map(|container| {
+        container
+            .get("turnId")
+            .or_else(|| container.get("turn_id"))
+            .or_else(|| container.get("turn").and_then(|turn| turn.get("id")))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn extract_review_thread_id(value: &Value) -> Option<String> {
+    value
+        .get("result")
+        .and_then(|result| result.get("reviewThreadId").or_else(|| result.get("review_thread_id")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn push_thread_id(out: &mut Vec<String>, value: Option<&Value>) {
@@ -411,16 +440,25 @@ fn should_broadcast_global_workspace_notification(
 }
 
 #[derive(Clone)]
+pub(crate) struct PendingLocalStart {
+    request_id: u64,
+    request_thread_id: Option<String>,
+    expected_thread_id: Option<String>,
+    request_kind: String,
+}
+
+#[derive(Clone)]
 pub(crate) struct RequestContext {
     workspace_id: String,
     method: String,
+    pending_local_start: Option<PendingLocalStart>,
 }
 
 fn build_initialize_params(client_version: &str) -> Value {
     json!({
         "clientInfo": {
             "name": "codex_monitor",
-            "title": "Codex Monitor",
+            "title": "Codex Quota Guard",
             "version": client_version
         },
         "capabilities": {
@@ -445,11 +483,79 @@ pub(crate) struct WorkspaceSession {
     pub(crate) owner_workspace_id: String,
     pub(crate) workspace_ids: Mutex<HashSet<String>>,
     pub(crate) workspace_roots: Mutex<HashMap<String, String>>,
+    pub(crate) bound_workspace_ids: Mutex<HashSet<String>>,
+    pub(crate) session_epoch: String,
+    pub(crate) canonical_codex_home: String,
+    pub(crate) quota_guard: Option<QuotaGuardEventSink>,
+    pub(crate) quota_gate: Option<ProcessGate>,
 }
 
 impl WorkspaceSession {
-    pub(crate) async fn register_workspace(&self, workspace_id: &str) {
-        self.register_workspace_with_path(workspace_id, None).await;
+    pub(crate) fn session_epoch(&self) -> &str {
+        &self.session_epoch
+    }
+
+    pub(crate) fn canonical_codex_home(&self) -> &str {
+        &self.canonical_codex_home
+    }
+
+    fn observe_guard(&self, event: QuotaGuardEvent) {
+        if let Some(quota_guard) = &self.quota_guard {
+            let _ = quota_guard.observe(event);
+        }
+    }
+
+    async fn record_start_failed(
+        &self,
+        start: &PendingLocalStart,
+        workspace_id: &str,
+        reason: String,
+    ) -> Result<(), String> {
+        let event = QuotaGuardEvent::StartFailed {
+            request_id: start.request_id,
+            session_epoch: self.session_epoch.clone(),
+            workspace_id: workspace_id.to_string(),
+            reason,
+        };
+        if let Some(quota_guard) = &self.quota_guard {
+            quota_guard.record_start_failed(event).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn record_pending_start(
+        &self,
+        start: &PendingLocalStart,
+        workspace_id: &str,
+    ) -> Result<(), String> {
+        let event = QuotaGuardEvent::PendingLocalStart {
+            request_id: start.request_id,
+            session_epoch: self.session_epoch.clone(),
+            workspace_id: workspace_id.to_string(),
+            request_thread_id: start.request_thread_id.clone(),
+            expected_thread_id: start.expected_thread_id.clone(),
+            request_kind: start.request_kind.clone(),
+        };
+        if let Some(quota_guard) = &self.quota_guard {
+            quota_guard.record_pending_start(event).await
+        } else {
+            Ok(())
+        }
+    }
+
+    fn close_workspace_admission(&self, workspace_id: &str) {
+        if let Some(gate) = &self.quota_gate {
+            gate.revoke_epoch(&self.session_epoch, workspace_id);
+        }
+    }
+
+    fn close_for_identity_change(&self) {
+        if let Some(gate) = &self.quota_gate {
+            if gate.policy() != ProcessPolicy::DisabledOpen {
+                gate.set_policy(ProcessPolicy::EnabledClosed);
+            }
+        }
     }
 
     pub(crate) async fn register_workspace_with_path(
@@ -472,13 +578,51 @@ impl WorkspaceSession {
         }
     }
 
-    pub(crate) async fn unregister_workspace(&self, workspace_id: &str) {
+    pub(crate) async fn bind_workspace(
+        &self,
+        workspace_id: &str,
+        workspace_path: Option<&str>,
+    ) {
+        self.register_workspace_with_path(workspace_id, workspace_path)
+            .await;
+        let newly_bound = self
+            .bound_workspace_ids
+            .lock()
+            .await
+            .insert(workspace_id.to_string());
+        if newly_bound {
+            if let Some(gate) = &self.quota_gate {
+                gate.register_closed_epoch(self.session_epoch.clone(), workspace_id.to_string());
+            }
+            self.observe_guard(QuotaGuardEvent::WorkspaceBound {
+                session_epoch: self.session_epoch.clone(),
+                workspace_id: workspace_id.to_string(),
+                canonical_codex_home: self.canonical_codex_home.clone(),
+            });
+        }
+    }
+
+    pub(crate) async fn revoke_workspace(&self, workspace_id: &str) {
+        if let Some(gate) = &self.quota_gate {
+            gate.revoke_epoch(&self.session_epoch, workspace_id);
+        }
+        let was_bound = self.bound_workspace_ids.lock().await.remove(workspace_id);
         self.workspace_ids.lock().await.remove(workspace_id);
         self.workspace_roots.lock().await.remove(workspace_id);
+        if was_bound {
+            self.observe_guard(QuotaGuardEvent::WorkspaceDisconnected {
+                session_epoch: self.session_epoch.clone(),
+                workspace_id: workspace_id.to_string(),
+            });
+        }
     }
 
     pub(crate) async fn workspace_ids_snapshot(&self) -> Vec<String> {
         self.workspace_ids.lock().await.iter().cloned().collect()
+    }
+
+    pub(crate) async fn is_workspace_bound(&self, workspace_id: &str) -> bool {
+        self.bound_workspace_ids.lock().await.contains(workspace_id)
     }
 
     async fn write_message(&self, value: Value) -> Result<(), String> {
@@ -496,21 +640,85 @@ impl WorkspaceSession {
             .await
     }
 
+    async fn send_initialize_request(&self, params: Value) -> Result<Value, String> {
+        self.send_request_inner(self.owner_workspace_id.as_str(), "initialize", params, true)
+            .await
+    }
+
     pub(crate) async fn send_request_for_workspace(
         &self,
         workspace_id: &str,
         method: &str,
         params: Value,
     ) -> Result<Value, String> {
+        self.send_request_inner(workspace_id, method, params, false).await
+    }
+
+    async fn send_request_inner(
+        &self,
+        workspace_id: &str,
+        method: &str,
+        params: Value,
+        allow_unbound: bool,
+    ) -> Result<Value, String> {
+        if !allow_unbound && !self.is_workspace_bound(workspace_id).await {
+            return Err("workspace session is not bound to this workspace".to_string());
+        }
+
+        let is_inference = matches!(
+            method,
+            "turn/start" | "turn/steer" | "review/start" | "thread/compact/start"
+        );
+        let admission = if is_inference {
+            self.quota_gate
+                .as_ref()
+                .map(|gate| {
+                    gate.admit(Some(&self.session_epoch), workspace_id)
+                        .map_err(quota_guard_blocked_error)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.register_workspace(workspace_id).await;
+        let request_thread_id = extract_thread_id(&json!({ "params": params.clone() }));
+        let pending_local_start = match method {
+            "turn/start" | "thread/compact/start" => Some(PendingLocalStart {
+                request_id: id,
+                expected_thread_id: request_thread_id.clone(),
+                request_thread_id,
+                request_kind: method.to_string(),
+            }),
+            "review/start" => Some(PendingLocalStart {
+                request_id: id,
+                request_thread_id,
+                expected_thread_id: None,
+                request_kind: method.to_string(),
+            }),
+            _ => None,
+        };
+
+        if let Some(start) = pending_local_start.as_ref() {
+            // This acknowledgement is the durable ownership seam. Do not
+            // write an inference-start request that recovery cannot account
+            // for after a crash.
+            if let Err(error) = self.record_pending_start(start, workspace_id).await {
+                self.close_workspace_admission(workspace_id);
+                return Err(format!(
+                    "quota guard could not persist pending local start: {error}"
+                ));
+            }
+        }
+
         self.pending.lock().await.insert(id, tx);
         self.request_context.lock().await.insert(
             id,
             RequestContext {
                 workspace_id: workspace_id.to_string(),
                 method: method.to_string(),
+                pending_local_start: pending_local_start.clone(),
             },
         );
         if let Some(thread_id) = extract_thread_id(&json!({ "params": params.clone() })) {
@@ -525,18 +733,61 @@ impl WorkspaceSession {
         {
             self.pending.lock().await.remove(&id);
             self.request_context.lock().await.remove(&id);
+            if let Some(start) = pending_local_start.as_ref() {
+                if let Err(record_error) = self
+                    .record_start_failed(start, workspace_id, error.clone())
+                    .await
+                {
+                    self.close_workspace_admission(workspace_id);
+                    return Err(format!(
+                        "{error}; quota guard could not persist failed local start: {record_error}"
+                    ));
+                }
+            }
             return Err(error);
         }
+
+        // Closure finalization waits only for admissions that have not yet
+        // registered and written. A response may take minutes and must not
+        // keep the pre-close barrier open.
+        drop(admission);
         match timeout(REQUEST_TIMEOUT, rx).await {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(_)) => Err("request canceled".to_string()),
+            Ok(Err(_)) => {
+                self.pending.lock().await.remove(&id);
+                self.request_context.lock().await.remove(&id);
+                if let Some(start) = pending_local_start.as_ref() {
+                    if let Err(record_error) = self
+                        .record_start_failed(start, workspace_id, "request canceled".to_string())
+                        .await
+                    {
+                        self.close_workspace_admission(workspace_id);
+                        return Err(format!(
+                            "request canceled; quota guard could not persist failed local start: {record_error}"
+                        ));
+                    }
+                }
+                Err("request canceled".to_string())
+            }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
                 self.request_context.lock().await.remove(&id);
-                Err(format!(
+                let message = format!(
                     "request timed out after {} seconds",
                     REQUEST_TIMEOUT.as_secs()
-                ))
+                );
+                if let Some(start) = pending_local_start.as_ref() {
+                    if let Err(record_error) = self
+                        .record_start_failed(start, workspace_id, message.clone())
+                        .await
+                    {
+                        self.close_workspace_admission(workspace_id);
+                        return Err(format!(
+                            "{message}; quota guard could not persist failed local start: {record_error}"
+                        ));
+                    }
+                }
+                Err(message)
             }
         }
     }
@@ -558,6 +809,17 @@ impl WorkspaceSession {
         self.write_message(json!({ "id": id, "result": result }))
             .await
     }
+}
+
+fn quota_guard_blocked_error(status: crate::shared::quota_guard::gate::AdmissionStatus) -> String {
+    let state = match status.reason {
+        AdmissionReason::Open => "open",
+        AdmissionReason::GuardDisabled => "guardDisabled",
+        AdmissionReason::ProcessClosed => "processClosed",
+        AdmissionReason::EpochUnverified => "epochUnverified",
+        AdmissionReason::WorkspaceUnbound => "workspaceUnbound",
+    };
+    format!("QUOTA_GUARD_BLOCKED|state={state}|verifyAt=")
 }
 
 pub(crate) fn build_codex_path_env(codex_bin: Option<&str>) -> Option<String> {
@@ -753,9 +1015,21 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
     codex_home: Option<PathBuf>,
     client_version: String,
     event_sink: E,
+    quota_guard: Option<QuotaGuardEventSink>,
 ) -> Result<Arc<WorkspaceSession>, String> {
     let codex_bin = default_codex_bin;
     let _ = check_codex_installation(codex_bin.clone()).await?;
+    let canonical_codex_home = codex_home
+        .clone()
+        .or_else(resolve_default_codex_home)
+        .and_then(|path| std::fs::canonicalize(&path).ok().or(Some(path)))
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let session_epoch = NEXT_SESSION_EPOCH.fetch_add(1, Ordering::SeqCst).to_string();
+    let quota_gate = quota_guard.as_ref().map(QuotaGuardEventSink::gate);
+    if let Some(gate) = &quota_gate {
+        gate.register_closed_epoch(session_epoch.clone(), entry.id.clone());
+    }
 
     let mut command = build_codex_command_with_bin(
         codex_bin,
@@ -791,6 +1065,11 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
             entry.id.clone(),
             normalize_root_path(&entry.path),
         )])),
+        bound_workspace_ids: Mutex::new(HashSet::new()),
+        session_epoch,
+        canonical_codex_home,
+        quota_guard,
+        quota_gate,
     });
 
     let session_clone = Arc::clone(&session);
@@ -822,16 +1101,44 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
             let has_result_or_error = value.get("result").is_some() || value.get("error").is_some();
             let method_name = value.get("method").and_then(|method| method.as_str());
 
-            // Check if this event is for a background thread
+            // Keep the complete local-start context until this response has been
+            // classified; frontend routing must not be the ownership source.
             let thread_id = extract_thread_id(&value);
             let mut request_workspace: Option<String> = None;
             let mut request_method: Option<String> = None;
+            let mut pending_local_start: Option<PendingLocalStart> = None;
+            let mut deferred_start_failure: Option<(PendingLocalStart, String, String)> = None;
             if let Some(id) = maybe_id {
                 if has_result_or_error {
                     if let Some(context) = session_clone.request_context.lock().await.remove(&id) {
                         request_workspace = Some(context.workspace_id);
                         request_method = Some(context.method);
+                        pending_local_start = context.pending_local_start;
                     }
+                }
+            }
+            if let (Some(start), Some(workspace_id)) =
+                (pending_local_start.as_ref(), request_workspace.as_ref())
+            {
+                if value.get("error").is_some() {
+                    deferred_start_failure = Some((
+                        start.clone(),
+                        workspace_id.clone(),
+                        value
+                            .get("error")
+                            .and_then(|error| error.get("message"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("app-server request failed")
+                            .to_string(),
+                    ));
+                } else {
+                    session_clone.observe_guard(QuotaGuardEvent::StartResponse {
+                        request_id: start.request_id,
+                        session_epoch: session_clone.session_epoch.clone(),
+                        workspace_id: workspace_id.clone(),
+                        method: start.request_kind.clone(),
+                        value: value.clone(),
+                    });
                 }
             }
 
@@ -895,6 +1202,80 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
                 .or_else(|| request_workspace.clone())
                 .unwrap_or_else(|| fallback_workspace_id.clone());
 
+            if let Some(start) = pending_local_start {
+                if value.get("error").is_none() {
+                    let response_thread_id = if start.request_kind == "review/start" {
+                        extract_review_thread_id(&value)
+                    } else {
+                        extract_thread_id(&value).or(start.expected_thread_id)
+                    };
+                    if let Some(response_thread_id) = response_thread_id {
+                        session_clone
+                            .thread_workspace
+                            .lock()
+                            .await
+                            .insert(response_thread_id, routed_workspace_id.clone());
+                    }
+                }
+            }
+
+            // The quota observer must see raw app-server messages before hidden
+            // thread suppression or frontend fan-out can discard them.
+            match method_name {
+                Some("account/rateLimits/updated") => {
+                    session_clone.observe_guard(QuotaGuardEvent::RateLimits {
+                        session_epoch: session_clone.session_epoch.clone(),
+                        workspace_id: routed_workspace_id.clone(),
+                        value: value.clone(),
+                    });
+                }
+                Some("turn/started") => {
+                    if let (Some(thread_id), Some(turn_id)) =
+                        (thread_id.as_deref(), extract_turn_id(&value))
+                    {
+                        session_clone.observe_guard(QuotaGuardEvent::TurnStarted {
+                            session_epoch: session_clone.session_epoch.clone(),
+                            workspace_id: routed_workspace_id.clone(),
+                            thread_id: thread_id.to_string(),
+                            turn_id,
+                        });
+                    }
+                }
+                Some("turn/completed") => {
+                    if let (Some(thread_id), Some(turn_id)) =
+                        (thread_id.as_deref(), extract_turn_id(&value))
+                    {
+                        let params = value.get("params");
+                        let status = params
+                            .and_then(|params| params.get("status").or_else(|| params.get("turn").and_then(|turn| turn.get("status"))))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let error = params.and_then(|params| params.get("error").or_else(|| params.get("turn").and_then(|turn| turn.get("error")))).cloned();
+                        session_clone.observe_guard(QuotaGuardEvent::TurnCompleted {
+                            session_epoch: session_clone.session_epoch.clone(),
+                            workspace_id: routed_workspace_id.clone(),
+                            thread_id: thread_id.to_string(),
+                            turn_id,
+                            status,
+                            error,
+                        });
+                    }
+                }
+                Some("account/updated") | Some("account/login/completed") => {
+                    // An identity notification is security-significant. Close
+                    // before the non-blocking handoff so no request races the
+                    // strict identity revalidation the actor will start.
+                    session_clone.close_for_identity_change();
+                    session_clone.observe_guard(QuotaGuardEvent::AccountIdentityChanged {
+                        session_epoch: session_clone.session_epoch.clone(),
+                        workspace_id: routed_workspace_id.clone(),
+                        reason: method_name.unwrap_or_default().to_string(),
+                    });
+                }
+                _ => {}
+            }
+
             if let Some(ref tid) = thread_id {
                 if method_name == Some("codex/backgroundThread") {
                     let action = value
@@ -955,7 +1336,23 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
 
             if let Some(id) = maybe_id {
                 if has_result_or_error {
-                    if let Some(tx) = session_clone.pending.lock().await.remove(&id) {
+                    let sender = session_clone.pending.lock().await.remove(&id);
+                    if let Some((start, workspace_id, reason)) = deferred_start_failure {
+                        let session = Arc::clone(&session_clone);
+                        let response = value.clone();
+                        tokio::spawn(async move {
+                            if session
+                                .record_start_failed(&start, &workspace_id, reason)
+                                .await
+                                .is_err()
+                            {
+                                session.close_workspace_admission(&workspace_id);
+                            }
+                            if let Some(tx) = sender {
+                                let _ = tx.send(response);
+                            }
+                        });
+                    } else if let Some(tx) = sender {
                         let _ = tx.send(value);
                     }
                 } else if has_method {
@@ -1046,7 +1443,11 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
             }
         }
 
-        // Ensure pending foreground requests cannot accumulate after process output ends.
+        // A dead app-server can no longer honour an epoch permit. Revoke every
+        // committed workspace before exposing the disconnect to the actor.
+        for workspace_id in session_clone.workspace_ids_snapshot().await {
+            session_clone.revoke_workspace(&workspace_id).await;
+        }
         session_clone.pending.lock().await.clear();
         session_clone.request_context.lock().await.clear();
     });
@@ -1073,7 +1474,7 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
     let init_params = build_initialize_params(&client_version);
     let init_result = timeout(
         Duration::from_secs(15),
-        session.send_request("initialize", init_params),
+        session.send_initialize_request(init_params),
     )
     .await;
     let init_response = match init_result {
@@ -1106,7 +1507,7 @@ pub(crate) async fn spawn_workspace_session<E: EventSink>(
 mod tests {
     use super::{
         build_initialize_params, extract_related_thread_ids, extract_thread_entries_from_thread_list_result,
-        extract_thread_id, normalize_root_path, resolve_workspace_for_cwd,
+        extract_thread_id, extract_turn_id, normalize_root_path, resolve_workspace_for_cwd,
         should_suppress_hidden_thread_event, source_subagent_kind,
         thread_started_is_memory_consolidation,
     };
@@ -1141,6 +1542,12 @@ mod tests {
     fn extract_thread_id_returns_none_when_missing() {
         let value = json!({ "params": {} });
         assert_eq!(extract_thread_id(&value), None);
+    }
+
+    #[test]
+    fn extract_turn_id_accepts_nested_turn() {
+        let value = json!({ "params": { "turn": { "id": "turn-123" } } });
+        assert_eq!(extract_turn_id(&value), Some("turn-123".to_string()));
     }
 
     #[test]

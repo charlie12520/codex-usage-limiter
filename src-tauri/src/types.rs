@@ -375,8 +375,78 @@ pub(crate) struct RemoteBackendTarget {
     pub(crate) last_connected_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum QuotaAction {
+    NotifyOnly,
+    InterruptImmediately,
+    FinishCurrentTurn,
+}
+
+impl Default for QuotaAction {
+    fn default() -> Self {
+        Self::NotifyOnly
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DrainTimeoutAction {
+    NotifyAndHold,
+    Interrupt,
+}
+
+impl Default for DrainTimeoutAction {
+    fn default() -> Self {
+        Self::NotifyAndHold
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QuotaGuardSettings {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_quota_guard_threshold")]
+    pub(crate) primary_threshold_percent: u8,
+    #[serde(default = "default_quota_guard_threshold")]
+    pub(crate) secondary_threshold_percent: u8,
+    #[serde(default)]
+    pub(crate) action: QuotaAction,
+    #[serde(default = "default_drain_timeout_minutes")]
+    pub(crate) drain_timeout_minutes: u16,
+    #[serde(default)]
+    pub(crate) drain_timeout_action: DrainTimeoutAction,
+    #[serde(default = "default_reset_grace_minutes")]
+    pub(crate) reset_grace_minutes: u16,
+    #[serde(default = "default_notify_when_available")]
+    pub(crate) notify_when_available: bool,
+}
+
+impl Default for QuotaGuardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            primary_threshold_percent: default_quota_guard_threshold(),
+            secondary_threshold_percent: default_quota_guard_threshold(),
+            action: QuotaAction::NotifyOnly,
+            drain_timeout_minutes: default_drain_timeout_minutes(),
+            drain_timeout_action: DrainTimeoutAction::NotifyAndHold,
+            reset_grace_minutes: default_reset_grace_minutes(),
+            notify_when_available: default_notify_when_available(),
+        }
+    }
+}
+
+fn default_quota_guard_threshold() -> u8 { 90 }
+fn default_drain_timeout_minutes() -> u16 { 15 }
+fn default_reset_grace_minutes() -> u16 { 10 }
+fn default_notify_when_available() -> bool { true }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct AppSettings {
+    #[serde(default, rename = "quotaGuard")]
+    pub(crate) quota_guard: QuotaGuardSettings,
     #[serde(default, rename = "codexBin")]
     pub(crate) codex_bin: Option<String>,
     #[serde(default, rename = "codexArgs")]
@@ -720,7 +790,7 @@ fn default_chat_history_scrollback_items() -> Option<u32> {
 }
 
 fn default_automatic_app_update_checks_enabled() -> bool {
-    true
+    false
 }
 
 fn default_ui_font_family() -> String {
@@ -1124,6 +1194,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             codex_bin: None,
+            quota_guard: QuotaGuardSettings::default(),
             codex_args: None,
             backend_mode: default_backend_mode(),
             remote_backend_provider: RemoteBackendProvider::Tcp,
@@ -1159,7 +1230,7 @@ impl Default for AppSettings {
             show_message_file_path: default_show_message_file_path(),
             chat_history_scrollback_items: default_chat_history_scrollback_items(),
             thread_title_autogeneration_enabled: false,
-            automatic_app_update_checks_enabled: true,
+            automatic_app_update_checks_enabled: false,
             ui_font_family: default_ui_font_family(),
             code_font_family: default_code_font_family(),
             code_font_size: default_code_font_size(),
@@ -1214,6 +1285,12 @@ mod tests {
     fn app_settings_defaults_from_empty_json() {
         let settings: AppSettings = serde_json::from_str("{}").expect("settings deserialize");
         assert!(settings.codex_bin.is_none());
+        assert!(!settings.quota_guard.enabled);
+        assert_eq!(settings.quota_guard.primary_threshold_percent, 90);
+        assert_eq!(settings.quota_guard.secondary_threshold_percent, 90);
+        assert_eq!(settings.quota_guard.drain_timeout_minutes, 15);
+        assert_eq!(settings.quota_guard.reset_grace_minutes, 10);
+        assert!(settings.quota_guard.notify_when_available);
         let expected_backend_mode = if cfg!(target_os = "ios") {
             BackendMode::Remote
         } else {
@@ -1325,7 +1402,7 @@ mod tests {
         assert!(settings.show_message_file_path);
         assert_eq!(settings.chat_history_scrollback_items, Some(200));
         assert!(!settings.thread_title_autogeneration_enabled);
-        assert!(settings.automatic_app_update_checks_enabled);
+        assert!(!settings.automatic_app_update_checks_enabled);
         assert!(settings.ui_font_family.contains("system-ui"));
         assert!(settings.code_font_family.contains("ui-monospace"));
         assert_eq!(settings.code_font_size, 11);
@@ -1414,5 +1491,16 @@ mod tests {
         assert!(settings.sort_order.is_none());
         assert!(settings.group_id.is_none());
         assert!(settings.git_root.is_none());
+    }
+    #[test]
+    fn quota_guard_serializes_exact_camel_case_contract() {
+        let settings = AppSettings::default();
+        let value = serde_json::to_value(settings).expect("serialize settings");
+        let guard = value.get("quotaGuard").and_then(serde_json::Value::as_object).expect("quotaGuard object");
+        assert_eq!(guard.get("primaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
+        assert_eq!(guard.get("secondaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
+        assert_eq!(guard.get("action").and_then(serde_json::Value::as_str), Some("notifyOnly"));
+        assert_eq!(guard.get("drainTimeoutAction").and_then(serde_json::Value::as_str), Some("notifyAndHold"));
+        assert!(!guard.contains_key("primary_threshold_percent"));
     }
 }

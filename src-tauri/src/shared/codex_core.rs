@@ -624,6 +624,88 @@ pub(crate) async fn account_rate_limits_core(
         .await
 }
 
+fn account_read_params() -> Value {
+    json!({ "refreshToken": false })
+}
+
+pub(crate) fn strict_account_identity(value: &Value) -> Option<String> {
+    fn direct_identity(value: &Value) -> Option<String> {
+        ["accountId", "account_id", "email"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(Value::as_str).map(str::trim).filter(|candidate| !candidate.is_empty()))
+            .map(str::to_ascii_lowercase)
+    }
+
+    direct_identity(value)
+        .or_else(|| value.get("account").and_then(direct_identity))
+        .or_else(|| value.get("result").and_then(|result| {
+            direct_identity(result).or_else(|| result.get("account").and_then(direct_identity))
+        }))
+}
+
+fn json_shape(value: &Value) -> String {
+    fn collect(value: &Value, path: &str, entries: &mut Vec<String>) {
+        if entries.len() >= 64 {
+            return;
+        }
+        match value {
+            Value::Null => entries.push(format!("{path}:null")),
+            Value::Bool(_) => entries.push(format!("{path}:boolean")),
+            Value::Number(_) => entries.push(format!("{path}:number")),
+            Value::String(_) => entries.push(format!("{path}:string")),
+            Value::Array(items) => {
+                if items.is_empty() {
+                    entries.push(format!("{path}:array"));
+                } else {
+                    for item in items {
+                        collect(item, &format!("{path}[]"), entries);
+                        if entries.len() >= 64 {
+                            break;
+                        }
+                    }
+                }
+            }
+            Value::Object(fields) => {
+                if fields.is_empty() {
+                    entries.push(format!("{path}:object"));
+                } else {
+                    for (key, item) in fields {
+                        collect(item, &format!("{path}.{key}"), entries);
+                        if entries.len() >= 64 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    collect(value, "$", &mut entries);
+    entries.sort_unstable();
+    if entries.len() == 64 {
+        entries.push("…:truncated".into());
+    }
+    entries.join(",")
+}
+
+/// Reads identity only from the connected app-server. Unlike `account_read_core`
+/// this deliberately has no auth-file fallback: quota enforcement may not bind
+/// an identity from stale local credentials.
+pub(crate) async fn account_read_strict_core(
+    sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    workspace_id: String,
+) -> Result<Value, String> {
+    let session = get_session_clone(sessions, &workspace_id).await?;
+    let response = session
+        .send_request_for_workspace(&workspace_id, "account/read", account_read_params())
+        .await?;
+    if strict_account_identity(&response).is_none() {
+        return Err(format!("strict account/read response has no account identity; shape={}", json_shape(&response)));
+    }
+    Ok(response)
+}
+
 pub(crate) async fn account_read_core(
     sessions: &Mutex<HashMap<String, Arc<WorkspaceSession>>>,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
@@ -635,7 +717,7 @@ pub(crate) async fn account_read_core(
     };
     let response = if let Some(session) = session {
         session
-            .send_request_for_workspace(&workspace_id, "account/read", Value::Null)
+            .send_request_for_workspace(&workspace_id, "account/read", account_read_params())
             .await
             .ok()
     } else {
@@ -888,10 +970,51 @@ pub(crate) async fn get_config_model_core(
     Ok(json!({ "model": model }))
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn account_read_uses_non_refreshing_protocol_params() {
+        assert_eq!(account_read_params(), json!({ "refreshToken": false }));
+    }
+
+    #[test]
+    fn strict_account_identity_accepts_result_account_only() {
+        assert_eq!(
+            strict_account_identity(&json!({
+                "id": 42,
+                "result": { "account": { "email": "Member@Example.test", "planType": "pro" } }
+            })),
+            Some("member@example.test".into()),
+        );
+        assert_eq!(
+            strict_account_identity(&json!({
+                "id": "member@example.test",
+                "result": { "requestId": "unrelated" }
+            })),
+            None,
+        );
+        assert_eq!(
+            strict_account_identity(&json!({
+                "metadata": { "email": "member@example.test" }
+            })),
+            None,
+        );
+    }
+
+    #[test]
+    fn strict_identity_failure_shape_contains_paths_and_types_not_values() {
+        let shape = json_shape(&json!({
+            "id": 42,
+            "metadata": { "email": "Member@Example.test" }
+        }));
+        assert_eq!(shape, "$.id:number,$.metadata.email:string");
+        assert!(!shape.contains("Member"));
+        assert!(!shape.contains("42"));
+    }
 
     #[test]
     fn normalize_strips_file_uri_prefix() {

@@ -447,6 +447,7 @@ export function useThreadTurnEvents({
       markReviewing,
       pushThreadErrorMessage,
       safeMessageActivity,
+      pendingInterruptsRef,
       setActiveTurnId,
     ],
   );

@@ -111,6 +111,7 @@ fn spawn_with_client(
         codex_home,
         client_version,
         event_sink,
+        None,
     )
 }
 
@@ -1681,6 +1682,11 @@ mod tests {
             workspace_ids: Mutex::new(HashSet::from([owner_workspace_id.clone()])),
             workspace_roots: Mutex::new(HashMap::new()),
             owner_workspace_id,
+            bound_workspace_ids: Mutex::new(HashSet::new()),
+            session_epoch: "daemon-test-epoch".to_string(),
+            canonical_codex_home: "daemon-test-home".to_string(),
+            quota_guard: None,
+            quota_gate: None,
         })
     }
 

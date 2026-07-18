@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::dictation::DictationState;
 use crate::shared::codex_core::CodexLoginCancelState;
+use crate::shared::quota_guard::coordinator::QuotaGuardHandle;
 use crate::storage::{read_settings, read_workspaces};
 use crate::types::{AppSettings, TcpDaemonState, TcpDaemonStatus, WorkspaceEntry};
 
@@ -41,6 +42,12 @@ pub(crate) struct AppState {
     pub(crate) dictation: Mutex<DictationState>,
     pub(crate) codex_login_cancels: Mutex<HashMap<String, CodexLoginCancelState>>,
     pub(crate) tcp_daemon: Mutex<TcpDaemonRuntime>,
+    /// Serializes settings read/validation/write/guard-authority transitions.
+    pub(crate) settings_update_lock: Mutex<()>,
+    /// Kept in state now so the settings boundary can fail closed before actor
+    /// wiring is added at the app-server lifecycle seam.
+    pub(crate) quota_guard: QuotaGuardHandle,
+    pub(crate) quota_guard_state_path: PathBuf,
 }
 
 impl AppState {
@@ -51,6 +58,7 @@ impl AppState {
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| ".".into()));
         let storage_path = data_dir.join("workspaces.json");
         let settings_path = data_dir.join("settings.json");
+        let quota_guard_state_path = data_dir.join("quota-guard-state.json");
         let workspaces = read_workspaces(&storage_path).unwrap_or_default();
         let app_settings = read_settings(&settings_path).unwrap_or_default();
         Self {
@@ -64,6 +72,9 @@ impl AppState {
             dictation: Mutex::new(DictationState::default()),
             codex_login_cancels: Mutex::new(HashMap::new()),
             tcp_daemon: Mutex::new(TcpDaemonRuntime::default()),
+            settings_update_lock: Mutex::new(()),
+            quota_guard: QuotaGuardHandle::default(),
+            quota_guard_state_path,
         }
     }
 }

@@ -23,6 +23,10 @@ import {
 } from "@services/tauri";
 import { expandCustomPromptText } from "@utils/customPrompts";
 import {
+  isQuotaGuardBlockedError,
+  type QueueDispatchOutcome,
+} from "@/features/quota-guard/quotaGuardTypes";
+import {
   asString,
   extractReviewThreadId,
   extractRpcErrorMessage,
@@ -80,6 +84,10 @@ type UseThreadMessagingOptions = {
   onDebug?: (entry: DebugEntry) => void;
   pushThreadErrorMessage: (threadId: string, message: string) => void;
   ensureThreadForActiveWorkspace: () => Promise<string | null>;
+  startThreadForWorkspace?: (
+    workspaceId: string,
+    options?: { activate?: boolean },
+  ) => Promise<string | null>;
   ensureThreadForWorkspace: (workspaceId: string) => Promise<string | null>;
   refreshThread: (workspaceId: string, threadId: string) => Promise<string | null>;
   forkThreadForWorkspace: (
@@ -122,6 +130,7 @@ export function useThreadMessaging({
   recordThreadActivity,
   safeMessageActivity,
   onDebug,
+  startThreadForWorkspace,
   pushThreadErrorMessage,
   ensureThreadForActiveWorkspace,
   ensureThreadForWorkspace,
@@ -141,7 +150,7 @@ export function useThreadMessaging({
     ): Promise<SendMessageResult> => {
       const messageText = text.trim();
       if (!messageText && images.length === 0) {
-        return { status: "blocked" };
+        return { status: "blocked", reason: "other" };
       }
       let finalText = messageText;
       if (!options?.skipPromptExpansion) {
@@ -149,7 +158,7 @@ export function useThreadMessaging({
         if (promptExpansion && "error" in promptExpansion) {
           pushThreadErrorMessage(threadId, promptExpansion.error);
           safeMessageActivity();
-          return { status: "blocked" };
+          return { status: "blocked", reason: "other" };
         }
         finalText = promptExpansion?.expanded ?? messageText;
       }
@@ -273,12 +282,18 @@ export function useThreadMessaging({
           payload: response,
         });
         if (rpcError) {
+          const quotaGuardBlocked = isQuotaGuardBlockedError(rpcError);
           if (requestMode !== "steer") {
             markProcessing(threadId, false);
             setActiveTurnId(threadId, null);
-            pushThreadErrorMessage(threadId, `Turn failed to start: ${rpcError}`);
+            if (!quotaGuardBlocked) {
+              pushThreadErrorMessage(threadId, `Turn failed to start: ${rpcError}`);
+            }
             safeMessageActivity();
-            return { status: "blocked" };
+            return {
+              status: "blocked",
+              reason: quotaGuardBlocked ? "quotaGuard" : "other",
+            };
           }
           if (isStaleSteerTurnError(rpcError)) {
             markProcessing(threadId, false);
@@ -309,12 +324,13 @@ export function useThreadMessaging({
           setActiveTurnId(threadId, null);
           pushThreadErrorMessage(threadId, "Turn failed to start.");
           safeMessageActivity();
-          return { status: "blocked" };
+          return { status: "blocked", reason: "other" };
         }
         setActiveTurnId(threadId, turnId);
         return { status: "sent" };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        const quotaGuardBlocked = isQuotaGuardBlockedError(errorMessage);
         if (requestMode !== "steer") {
           markProcessing(threadId, false);
           setActiveTurnId(threadId, null);
@@ -329,14 +345,21 @@ export function useThreadMessaging({
           label: requestMode === "steer" ? "turn/steer error" : "turn/start error",
           payload: errorMessage,
         });
-        pushThreadErrorMessage(
-          threadId,
-          requestMode === "steer"
-            ? `Turn steer failed: ${errorMessage}`
-            : errorMessage,
-        );
+        if (!quotaGuardBlocked) {
+          pushThreadErrorMessage(
+            threadId,
+            requestMode === "steer"
+              ? `Turn steer failed: ${errorMessage}`
+              : errorMessage,
+          );
+        }
         safeMessageActivity();
-        return { status: requestMode === "steer" ? "steer_failed" : "blocked" };
+        return requestMode === "steer"
+          ? { status: "steer_failed" }
+          : {
+              status: "blocked",
+              reason: quotaGuardBlocked ? "quotaGuard" : "other",
+            };
       }
     },
     [
@@ -370,11 +393,11 @@ export function useThreadMessaging({
       options?: { sendIntent?: ComposerSendIntent },
     ): Promise<SendMessageResult> => {
       if (!activeWorkspace) {
-        return { status: "blocked" };
+        return { status: "blocked", reason: "other" };
       }
       const messageText = text.trim();
       if (!messageText && images.length === 0) {
-        return { status: "blocked" };
+        return { status: "blocked", reason: "other" };
       }
       const promptExpansion = expandCustomPromptText(messageText, customPrompts);
       if (promptExpansion && "error" in promptExpansion) {
@@ -390,12 +413,12 @@ export function useThreadMessaging({
             payload: promptExpansion.error,
           });
         }
-        return { status: "blocked" };
+        return { status: "blocked", reason: "other" };
       }
       const finalText = promptExpansion?.expanded ?? messageText;
       const threadId = await ensureThreadForActiveWorkspace();
       if (!threadId) {
-        return { status: "blocked" };
+        return { status: "blocked", reason: "other" };
       }
       return sendMessageToThread(activeWorkspace, threadId, finalText, images, {
         skipPromptExpansion: true,
@@ -490,7 +513,11 @@ export function useThreadMessaging({
   ]);
 
   const startReviewTarget = useCallback(
-    async (target: ReviewTarget, workspaceIdOverride?: string): Promise<boolean> => {
+    async (
+      target: ReviewTarget,
+      workspaceIdOverride?: string,
+      options?: { propagateQuotaGuardBlocked?: boolean },
+    ): Promise<boolean> => {
       const workspaceId = workspaceIdOverride ?? activeWorkspace?.id ?? null;
       if (!workspaceId) {
         return false;
@@ -540,7 +567,13 @@ export function useThreadMessaging({
             markReviewing(threadId, false);
             setActiveTurnId(threadId, null);
           }
-          pushThreadErrorMessage(threadId, `Review failed to start: ${rpcError}`);
+          if (isQuotaGuardBlockedError(rpcError)) {
+            if (options?.propagateQuotaGuardBlocked) {
+              throw new Error(rpcError);
+            }
+          } else {
+            pushThreadErrorMessage(threadId, `Review failed to start: ${rpcError}`);
+          }
           safeMessageActivity();
           return false;
         }
@@ -568,10 +601,13 @@ export function useThreadMessaging({
           label: "review/start error",
           payload: error instanceof Error ? error.message : String(error),
         });
-        pushThreadErrorMessage(
-          threadId,
-          error instanceof Error ? error.message : String(error),
-        );
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (options?.propagateQuotaGuardBlocked && isQuotaGuardBlockedError(errorMessage)) {
+          throw error;
+        }
+        if (!isQuotaGuardBlockedError(errorMessage)) {
+          pushThreadErrorMessage(threadId, errorMessage);
+        }
         safeMessageActivity();
         return false;
       }
@@ -642,6 +678,28 @@ export function useThreadMessaging({
       openReviewPrompt,
       startReviewTarget,
     ],
+  );
+  const startQueuedReview = useCallback(
+    async (text: string): Promise<QueueDispatchOutcome> => {
+      if (!activeWorkspace || !text.trim()) {
+        return "accepted";
+      }
+      const trimmed = text.trim();
+      const rest = trimmed.replace(/^\/review\b/i, "").trim();
+      if (!rest) {
+        openReviewPrompt();
+        return "accepted";
+      }
+      try {
+        await startReviewTarget(parseReviewTarget(trimmed), undefined, {
+          propagateQuotaGuardBlocked: true,
+        });
+        return "accepted";
+      } catch (error) {
+        return isQuotaGuardBlockedError(error) ? "quotaBlocked" : "accepted";
+      }
+    },
+    [activeWorkspace, openReviewPrompt, startReviewTarget],
   );
 
   const startUncommittedReview = useCallback(
@@ -851,21 +909,25 @@ export function useThreadMessaging({
     ],
   );
 
-  const startFork = useCallback(
-    async (text: string) => {
+  const startForkWithOutcome = useCallback(
+    async (text: string): Promise<QueueDispatchOutcome> => {
       if (!activeWorkspace || !activeThreadId) {
-        return;
+        return "accepted";
       }
       const trimmed = text.trim();
       const rest = trimmed.replace(/^\/fork\b/i, "").trim();
       const threadId = await forkThreadForWorkspace(activeWorkspace.id, activeThreadId);
       if (!threadId) {
-        return;
+        return "accepted";
       }
       updateThreadParent(activeThreadId, [threadId]);
-      if (rest) {
-        await sendMessageToThread(activeWorkspace, threadId, rest, []);
+      if (!rest) {
+        return "accepted";
       }
+      const result = await sendMessageToThread(activeWorkspace, threadId, rest, []);
+      return result.status === "blocked" && result.reason === "quotaGuard"
+        ? "quotaBlocked"
+        : "accepted";
     },
     [
       activeThreadId,
@@ -874,6 +936,18 @@ export function useThreadMessaging({
       sendMessageToThread,
       updateThreadParent,
     ],
+  );
+
+  const startFork = useCallback(
+    async (text: string): Promise<void> => {
+      await startForkWithOutcome(text);
+    },
+    [startForkWithOutcome],
+  );
+
+  const startQueuedFork = useCallback(
+    async (text: string): Promise<QueueDispatchOutcome> => startForkWithOutcome(text),
+    [startForkWithOutcome],
   );
 
   const startResume = useCallback(
@@ -901,24 +975,29 @@ export function useThreadMessaging({
     ],
   );
 
-  const startCompact = useCallback(
-    async (_text: string) => {
+  const startCompactWithOutcome = useCallback(
+    async (_text: string): Promise<QueueDispatchOutcome> => {
       if (!activeWorkspace) {
-        return;
+        return "accepted";
       }
       const threadId = activeThreadId ?? (await ensureThreadForActiveWorkspace());
       if (!threadId) {
-        return;
+        return "accepted";
       }
       try {
         await compactThreadService(activeWorkspace.id, threadId);
+        return "accepted";
       } catch (error) {
+        if (isQuotaGuardBlockedError(error)) {
+          return "quotaBlocked";
+        }
         pushThreadErrorMessage(
           threadId,
           error instanceof Error
             ? error.message
             : "Failed to start context compaction.",
         );
+        return "accepted";
       } finally {
         safeMessageActivity();
       }
@@ -932,6 +1011,35 @@ export function useThreadMessaging({
     ],
   );
 
+  const startCompact = useCallback(
+    async (text: string): Promise<void> => {
+      await startCompactWithOutcome(text);
+    },
+    [startCompactWithOutcome],
+  );
+
+  const startQueuedCompact = useCallback(
+    async (text: string): Promise<QueueDispatchOutcome> => startCompactWithOutcome(text),
+    [startCompactWithOutcome],
+  );
+  const startQueuedNew = useCallback(
+    async (text: string): Promise<QueueDispatchOutcome> => {
+      if (!activeWorkspace || !startThreadForWorkspace) {
+        return "accepted";
+      }
+      const threadId = await startThreadForWorkspace(activeWorkspace.id);
+      const rest = text.trim().replace(/^\/new\b/i, "").trim();
+      if (!threadId || !rest) {
+        return "accepted";
+      }
+      const result = await sendMessageToThread(activeWorkspace, threadId, rest, []);
+      return result.status === "blocked" && result.reason === "quotaGuard"
+        ? "quotaBlocked"
+        : "accepted";
+    },
+    [activeWorkspace, sendMessageToThread, startThreadForWorkspace],
+  );
+
   return {
     interruptTurn,
     sendUserMessage,
@@ -941,6 +1049,10 @@ export function useThreadMessaging({
     startUncommittedReview,
     startResume,
     startCompact,
+    startQueuedFork,
+    startQueuedReview,
+    startQueuedCompact,
+    startQueuedNew,
     startApps,
     startMcp,
     startFast,

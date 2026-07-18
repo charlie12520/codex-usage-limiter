@@ -407,6 +407,8 @@ function buildPrimarySurface({
       onOpenSettings: sidebarHandlers.onOpenSettings,
       onOpenDebug: handleDebugClick,
       showDebugButton,
+      quotaGuardState: composerWorkspaceState.quotaGuard.state,
+      onOpenQuotaGuardPanel: composerWorkspaceState.openQuotaGuardPanel,
       onAddWorkspace: handleAddWorkspace,
       onSelectHome: sidebarHandlers.onSelectHome,
       onSelectWorkspace: sidebarHandlers.onSelectWorkspace,

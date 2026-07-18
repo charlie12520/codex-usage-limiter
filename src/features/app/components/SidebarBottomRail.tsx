@@ -8,6 +8,8 @@ import {
   PopoverSurface,
 } from "../../design-system/components/popover/PopoverPrimitives";
 import { useMenuController } from "../hooks/useMenuController";
+import { QuotaGuardStatusBadge } from "@/features/quota-guard/components/QuotaGuardStatusBadge";
+import type { QuotaGuardPublicState } from "@/features/quota-guard/quotaGuardTypes";
 
 type SidebarBottomRailProps = {
   sessionPercent: number | null;
@@ -27,6 +29,8 @@ type SidebarBottomRailProps = {
   accountCancelDisabled: boolean;
   onSwitchAccount: () => void;
   onCancelSwitchAccount: () => void;
+  quotaGuardState?: QuotaGuardPublicState | null;
+  onOpenQuotaGuardPanel?: () => void;
 };
 
 type UsageRowProps = {
@@ -70,6 +74,8 @@ export function SidebarBottomRail({
   accountCancelDisabled,
   onSwitchAccount,
   onCancelSwitchAccount,
+  quotaGuardState,
+  onOpenQuotaGuardPanel,
 }: SidebarBottomRailProps) {
   const accountMenu = useMenuController();
   const {
@@ -78,7 +84,6 @@ export function SidebarBottomRail({
     close: closeAccountMenu,
     toggle: toggleAccountMenu,
   } = accountMenu;
-
   useEffect(() => {
     if (!showAccountSwitcher) {
       closeAccountMenu();
@@ -106,6 +111,7 @@ export function SidebarBottomRail({
             />
           )}
         </div>
+        <QuotaGuardStatusBadge state={quotaGuardState ?? null} onOpen={onOpenQuotaGuardPanel} />
       </div>
       <div
         className={`sidebar-bottom-actions${showAccountSwitcher ? "" : " is-compact"}`}

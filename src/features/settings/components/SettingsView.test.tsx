@@ -161,6 +161,16 @@ const baseSettings: AppSettings = {
   ],
   selectedOpenAppId: "vscode",
   globalWorktreesFolder: null,
+  quotaGuard: {
+    enabled: false,
+    primaryThresholdPercent: 90,
+    secondaryThresholdPercent: 90,
+    action: "notifyOnly",
+    drainTimeoutMinutes: 15,
+    drainTimeoutAction: "notifyAndHold",
+    resetGraceMinutes: 10,
+    notifyWhenAvailable: true,
+  },
 };
 
 const createDoctorResult = () => ({
@@ -752,7 +762,7 @@ describe("SettingsView Display", () => {
 });
 
 describe("SettingsView About", () => {
-  it("toggles automatic app update checks", async () => {
+  it("disables app update checks when no updater endpoint is configured", () => {
     const onToggleAutomaticAppUpdateChecks = vi.fn();
     renderAboutSection({
       onToggleAutomaticAppUpdateChecks,
@@ -765,11 +775,11 @@ describe("SettingsView About", () => {
     if (!row) {
       throw new Error("Expected automatic app update checks row");
     }
-    fireEvent.click(within(row).getByRole("button"));
+    const toggle = within(row).getByRole("button") as HTMLButtonElement;
 
-    await waitFor(() => {
-      expect(onToggleAutomaticAppUpdateChecks).toHaveBeenCalledTimes(1);
-    });
+    expect(toggle.disabled).toBe(true);
+    fireEvent.click(toggle);
+    expect(onToggleAutomaticAppUpdateChecks).not.toHaveBeenCalled();
   });
 });
 

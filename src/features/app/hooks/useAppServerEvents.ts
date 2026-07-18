@@ -3,6 +3,8 @@ import type {
   AppServerEvent,
   ApprovalRequest,
   RequestUserInputRequest,
+  TurnCompletionPayload,
+  TurnStatus,
 } from "../../../types";
 import { subscribeAppServerEvents } from "../../../services/events";
 import {
@@ -61,7 +63,12 @@ type AppServerEventHandlers = {
   onAgentMessageCompleted?: (event: AgentCompleted) => void;
   onAppServerEvent?: (event: AppServerEvent) => void;
   onTurnStarted?: (workspaceId: string, threadId: string, turnId: string) => void;
-  onTurnCompleted?: (workspaceId: string, threadId: string, turnId: string) => void;
+  onTurnCompleted?: (
+    workspaceId: string,
+    threadId: string,
+    turnId: string,
+    completion?: TurnCompletionPayload,
+  ) => void;
   onTurnError?: (
     workspaceId: string,
     threadId: string,
@@ -388,8 +395,24 @@ export function useAppServerEvents(handlers: AppServerEventHandlers) {
           params.threadId ?? params.thread_id ?? turn?.threadId ?? turn?.thread_id ?? "",
         );
         const turnId = String(turn?.id ?? params.turnId ?? params.turn_id ?? "");
+        const rawStatus = turn?.status ?? params.status;
+        const status: TurnStatus | null =
+          rawStatus === "completed" ||
+          rawStatus === "interrupted" ||
+          rawStatus === "failed" ||
+          rawStatus === "inProgress"
+            ? rawStatus
+            : null;
+        const rawError = turn?.error ?? params.error;
+        const error =
+          rawError && typeof rawError === "object"
+            ? (rawError as Record<string, unknown>)
+            : null;
         if (threadId) {
-          currentHandlers.onTurnCompleted?.(workspace_id, threadId, turnId);
+          currentHandlers.onTurnCompleted?.(workspace_id, threadId, turnId, {
+            status,
+            error,
+          });
         }
         return;
       }

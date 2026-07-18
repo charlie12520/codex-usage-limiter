@@ -15,7 +15,10 @@ use crate::storage::write_workspaces;
 use crate::types::{AppSettings, WorkspaceEntry, WorkspaceInfo, WorkspaceKind, WorkspaceSettings};
 use crate::utils::normalize_windows_namespace_path;
 
-use super::connect::{kill_session_by_id, take_live_shared_session, workspace_session_spawn_lock};
+use super::connect::{
+    bind_workspace_session, kill_session_by_id, take_live_shared_session,
+    workspace_session_spawn_lock,
+};
 use super::helpers::{
     normalize_setup_script, normalize_workspace_path_input, workspace_path_to_string,
 };
@@ -89,10 +92,7 @@ where
         return Err(error);
     }
 
-    session
-        .register_workspace_with_path(&entry.id, Some(&entry.path))
-        .await;
-    sessions.lock().await.insert(entry.id.clone(), session);
+    bind_workspace_session(sessions, session, &entry.id, Some(&entry.path)).await;
 
     Ok(WorkspaceInfo {
         id: entry.id,
@@ -244,10 +244,7 @@ where
         return Err(error);
     }
 
-    session
-        .register_workspace_with_path(&entry.id, Some(&entry.path))
-        .await;
-    sessions.lock().await.insert(entry.id.clone(), session);
+    bind_workspace_session(sessions, session, &entry.id, Some(&entry.path)).await;
 
     Ok(WorkspaceInfo {
         id: entry.id,
@@ -409,10 +406,7 @@ where
         return Err(error);
     }
 
-    session
-        .register_workspace_with_path(&entry.id, Some(&entry.path))
-        .await;
-    sessions.lock().await.insert(entry.id.clone(), session);
+    bind_workspace_session(sessions, session, &entry.id, Some(&entry.path)).await;
 
     Ok(WorkspaceInfo {
         id: entry.id,

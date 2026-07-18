@@ -7,6 +7,7 @@ import type {
   SendMessageResult,
   WorkspaceInfo,
 } from "../../../types";
+import type { QueueDispatchOutcome } from "@/features/quota-guard/quotaGuardTypes";
 import { useComposerImages } from "../../composer/hooks/useComposerImages";
 import { useQueuedSend } from "../../threads/hooks/useQueuedSend";
 
@@ -22,17 +23,17 @@ export function useComposerController({
   followUpMessageBehavior,
   appsEnabled,
   connectWorkspace,
-  startThreadForWorkspace,
   sendUserMessage,
-  sendUserMessageToThread,
-  startFork,
-  startReview,
+  startQueuedFork,
+  startQueuedReview,
   startResume,
-  startCompact,
+  startQueuedCompact,
+  startQueuedNew,
   startApps,
   startMcp,
   startFast,
   startStatus,
+  onQuotaGuardBlocked,
 }: {
   activeThreadId: string | null;
   activeTurnId: string | null;
@@ -45,30 +46,22 @@ export function useComposerController({
   followUpMessageBehavior: FollowUpMessageBehavior;
   appsEnabled: boolean;
   connectWorkspace: (workspace: WorkspaceInfo) => Promise<void>;
-  startThreadForWorkspace: (
-    workspaceId: string,
-    options?: { activate?: boolean },
-  ) => Promise<string | null>;
   sendUserMessage: (
     text: string,
     images?: string[],
     appMentions?: AppMention[],
     options?: { sendIntent?: ComposerSendIntent },
-  ) => Promise<{ status: "sent" | "blocked" | "steer_failed" }>;
-  sendUserMessageToThread: (
-    workspace: WorkspaceInfo,
-    threadId: string,
-    text: string,
-    images?: string[],
-  ) => Promise<void | SendMessageResult>;
-  startFork: (text: string) => Promise<void>;
-  startReview: (text: string) => Promise<void>;
+  ) => Promise<SendMessageResult>;
+  startQueuedFork: (text: string) => Promise<QueueDispatchOutcome>;
+  startQueuedReview: (text: string) => Promise<QueueDispatchOutcome>;
   startResume: (text: string) => Promise<void>;
-  startCompact: (text: string) => Promise<void>;
+  startQueuedCompact: (text: string) => Promise<QueueDispatchOutcome>;
+  startQueuedNew: (text: string) => Promise<QueueDispatchOutcome>;
   startApps: (text: string) => Promise<void>;
   startMcp: (text: string) => Promise<void>;
   startFast: (text: string) => Promise<void>;
   startStatus: (text: string) => Promise<void>;
+  onQuotaGuardBlocked?: () => void;
 }) {
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, string>
@@ -93,6 +86,7 @@ export function useComposerController({
     handleSend,
     queueMessage,
     removeQueuedMessage,
+    resumeQueuedSends,
   } = useQueuedSend({
     activeThreadId,
     activeTurnId,
@@ -104,17 +98,17 @@ export function useComposerController({
     appsEnabled,
     activeWorkspace,
     connectWorkspace,
-    startThreadForWorkspace,
     sendUserMessage,
-    sendUserMessageToThread,
-    startFork,
-    startReview,
+    startQueuedFork,
+    startQueuedReview,
     startResume,
-    startCompact,
+    startQueuedCompact,
+    startQueuedNew,
     startApps,
     startMcp,
     startFast,
     startStatus,
+    onQuotaGuardBlocked,
     clearActiveImages,
   });
 
@@ -187,6 +181,7 @@ export function useComposerController({
     clearActiveImages,
     setImagesForThread,
     removeImagesForThread,
+    resumeQueuedSends,
     activeQueue,
     handleSend,
     queueMessage,
