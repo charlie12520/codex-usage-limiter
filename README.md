@@ -42,7 +42,7 @@ On first run, connect the folder where you use Codex when prompted — the limit
 
 ## Build from source
 
-Requirements: Node.js 20+, npm, and a stable Rust toolchain. No other native tooling is needed.
+Requirements: Node.js 20+, npm, and a stable Rust toolchain (on Windows, rustup's default MSVC toolchain — accept its Visual Studio Build Tools prompt during setup). No other native tooling is needed.
 
 ```bash
 git clone https://github.com/charlie12520/codex-usage-limiter.git
