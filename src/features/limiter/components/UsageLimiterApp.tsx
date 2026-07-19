@@ -416,6 +416,9 @@ export function UsageLimiterApp() {
   const saveSettings = async () => {
     const saved = await persistDraft(draft);
     if (!saved) return;
+    setAppearance(draftAppearance);
+    setWindowMode(draftWindowMode);
+    setAlwaysOnTop(draftAlwaysOnTop);
     if (draftAutostart !== autostart) {
       try {
         await setAutostart(draftAutostart);
@@ -425,9 +428,6 @@ export function UsageLimiterApp() {
         return;
       }
     }
-    setAppearance(draftAppearance);
-    setWindowMode(draftWindowMode);
-    setAlwaysOnTop(draftAlwaysOnTop);
     setScreen("monitor");
   };
 

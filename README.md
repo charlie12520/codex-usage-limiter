@@ -45,7 +45,7 @@ Because releases are not code-signed yet, SmartScreen may show "Windows protecte
 
 On first run, connect the folder where you use Codex when prompted — the limiter reads usage and proves account identity through a local Codex app-server session in that workspace. Tracking starts automatically once a workspace is connected.
 
-Closing the window hides the limiter to the system tray, where the icon's tooltip shows your remaining quota; use the tray menu to reopen or quit. Settings has a **Start at login** toggle to launch it at sign-in.
+Closing the window hides the limiter to the system tray; use the tray menu to reopen or quit. On Windows and macOS the tray icon's tooltip shows your remaining quota and left-clicking it reopens the window; Linux tray backends don't support hover tooltips or plain-click handlers, so use the menu's **Show** item there. Settings has a **Start at login** toggle to launch it at sign-in.
 
 ## Build from source
 

@@ -10,13 +10,15 @@ pub(crate) const TRAY_ID: &str = "limiter-tray";
 pub(crate) fn init_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    use tauri::Manager;
 
     let show = MenuItem::with_id(app, "limiter-show", "Show", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "limiter-quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
-    TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().expect("bundled window icon").clone())
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID);
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder
         .tooltip("Codex Usage Limiter")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -55,7 +57,6 @@ fn show_main_window(app: &AppHandle) {
 pub(crate) fn set_tray_usage_tooltip(app: AppHandle, tooltip: String) {
     #[cfg(desktop)]
     {
-        use tauri::Manager;
         if let Some(tray) = app.tray_by_id(TRAY_ID) {
             let _ = tray.set_tooltip(Some(tooltip));
         }
