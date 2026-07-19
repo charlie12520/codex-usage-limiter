@@ -23,8 +23,8 @@
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "trafficLightPosition": {
-          "x": 19,
-          "y": 24
+          "x": 12,
+          "y": 10
         },
         "transparent": true,
         "devtools": true

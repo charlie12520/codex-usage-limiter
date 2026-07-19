@@ -33,16 +33,23 @@ Compact keeps every control on the surface. Mini is a glance card. Pill is a tit
 
 ## Install
 
-Grab the zip from the [latest release](../../releases/latest), unzip, and run `codex-usage-limiter.exe`. Requirements:
+Grab a build from the [latest release](../../releases/latest):
 
-- Windows 10 or 11 (WebView2 runtime, preinstalled on both)
-- [Codex CLI](https://developers.openai.com/codex/cli) installed and signed in
+- **Windows** (primary, fully tested): unzip and run `codex-usage-limiter.exe`. Windows 10/11.
+- **macOS** (experimental, unsigned): open the `.dmg`, drag the app to Applications, then right-click → Open the first time to get past Gatekeeper.
+- **Linux** (experimental): `.AppImage` (chmod +x and run) or `.deb`.
+
+All platforms need the [Codex CLI](https://developers.openai.com/codex/cli) installed and signed in. The macOS and Linux builds compile in CI but the redesigned UI has only been hands-on verified on Windows — issue reports welcome.
+
+Because releases are not code-signed yet, SmartScreen may show "Windows protected your PC" on first launch — click **More info → Run anyway**. The source is right here and every release is built by [GitHub Actions](.github/workflows/release.yml) from the tagged commit.
 
 On first run, connect the folder where you use Codex when prompted — the limiter reads usage and proves account identity through a local Codex app-server session in that workspace. Tracking starts automatically once a workspace is connected.
 
+Closing the window hides the limiter to the system tray, where the icon's tooltip shows your remaining quota; use the tray menu to reopen or quit. Settings has a **Start at login** toggle to launch it at sign-in.
+
 ## Build from source
 
-Requirements: Node.js 20+, npm, and a stable Rust toolchain (on Windows, rustup's default MSVC toolchain — accept its Visual Studio Build Tools prompt during setup). No other native tooling is needed.
+Requirements: Node.js 20+, npm, and a stable Rust toolchain (on Windows, rustup's default MSVC toolchain — accept its Visual Studio Build Tools prompt during setup). On Linux, also install the WebKitGTK stack: `sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`. No other native tooling is needed.
 
 ```bash
 git clone https://github.com/charlie12520/codex-usage-limiter.git

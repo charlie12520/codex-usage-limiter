@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 #[cfg(desktop)]
 use tauri::RunEvent;
-#[cfg(target_os = "macos")]
+#[cfg(desktop)]
 use tauri::WindowEvent;
 
 mod backend;
@@ -14,6 +14,7 @@ mod event_sink;
 mod files;
 mod git;
 mod git_utils;
+mod limiter_shell;
 mod local_usage;
 #[cfg(desktop)]
 mod menu;
@@ -108,8 +109,10 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
+                // Close-to-tray: the limiter keeps monitoring in the
+                // background; Quit lives in the tray menu.
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -129,11 +132,8 @@ pub fn run() {
                     .start(app.handle().clone(), state.quota_guard_state_path.clone());
                 state.quota_guard.rehydrate();
             }
-            #[cfg(target_os = "macos")]
-            {
-                let tray_state = app.state::<tray::TrayState>();
-                tray::initialize(&app.handle(), tray_state.inner())?;
-            }
+            #[cfg(desktop)]
+            limiter_shell::init_tray(&app.handle())?;
             #[cfg(target_os = "windows")]
             {
                 if let Some(main_window) = app.get_webview_window("main") {
@@ -205,6 +205,9 @@ pub fn run() {
             menu::menu_set_accelerators,
             tray::set_tray_recent_threads,
             tray::set_tray_session_usage,
+            limiter_shell::set_tray_usage_tooltip,
+            limiter_shell::get_autostart,
+            limiter_shell::set_autostart,
             codex::codex_doctor,
             codex::codex_update,
             workspaces::list_workspaces,

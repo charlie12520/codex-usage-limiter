@@ -5,7 +5,10 @@ import type { QuotaGuardPublicState } from "@/features/quota-guard/quotaGuardTyp
 import { useQuotaGuardState } from "@/features/quota-guard/hooks/useQuotaGuardState";
 import {
   getAppSettings,
+  getAutostart,
   listWorkspaces,
+  setAutostart,
+  setTrayUsageTooltip,
   updateAppSettings,
 } from "@/services/tauri";
 import type { AppSettings, WorkspaceInfo } from "@/types";
@@ -41,8 +44,11 @@ vi.mock("@/features/quota-guard/hooks/useQuotaGuardState", () => ({
 vi.mock("@/services/tauri", () => ({
   addWorkspace: vi.fn(),
   getAppSettings: vi.fn(),
+  getAutostart: vi.fn(),
   listWorkspaces: vi.fn(),
   pickWorkspacePath: vi.fn(),
+  setAutostart: vi.fn(),
+  setTrayUsageTooltip: vi.fn(),
   updateAppSettings: vi.fn(),
 }));
 
@@ -101,6 +107,9 @@ afterEach(() => {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getAppSettings).mockResolvedValue(appSettings);
+  vi.mocked(getAutostart).mockResolvedValue(false);
+  vi.mocked(setAutostart).mockResolvedValue(undefined);
+  vi.mocked(setTrayUsageTooltip).mockResolvedValue(undefined);
   vi.mocked(listWorkspaces).mockResolvedValue([workspace]);
   vi.mocked(updateAppSettings).mockImplementation(async (settings) => settings);
   vi.mocked(useQuotaGuardState).mockReturnValue({
@@ -126,6 +135,28 @@ describe("UsageLimiterApp", () => {
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
     expect(screen.getByText("Below 10%")).toBeTruthy();
     expect(screen.getByText("Last checked just now")).toBeTruthy();
+  });
+
+  it("stages the autostart toggle and applies it on save", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Start at login" }));
+    expect(setAutostart).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(setAutostart).toHaveBeenCalledWith(true));
+  });
+
+  it("pushes the usage summary into the tray tooltip", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+
+    await waitFor(() => expect(setTrayUsageTooltip).toHaveBeenCalled());
+    const calls = vi.mocked(setTrayUsageTooltip).mock.calls;
+    expect(calls[calls.length - 1]?.[0]).toContain("37% left");
   });
 
   it("stages a window size change and applies it on save", async () => {

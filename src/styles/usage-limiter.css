@@ -218,6 +218,11 @@ select:disabled {
   border-radius: 5px;
 }
 
+/* macOS renders native traffic lights at the window's top left; clear them. */
+.limiter-window[data-platform="mac"] .limiter-titlebar__brand {
+  padding-left: 78px;
+}
+
 /* ---------- Shared monitor pieces ---------- */
 
 .limiter-page {

@@ -15,8 +15,11 @@ import { quotaGuardPhaseLabel } from "@/features/quota-guard/quotaGuardViewModel
 import {
   addWorkspace,
   getAppSettings,
+  getAutostart,
   listWorkspaces,
   pickWorkspacePath,
+  setAutostart,
+  setTrayUsageTooltip,
   updateAppSettings,
 } from "@/services/tauri";
 import type {
@@ -32,6 +35,8 @@ type Screen = "monitor" | "settings";
 type Appearance = "light" | "dark";
 type WindowMode = "compact" | "mini" | "pill";
 
+const IS_MAC = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+
 const APPEARANCE_KEY = "codex-usage-limiter.appearance";
 const WINDOW_MODE_KEY = "codex-usage-limiter.windowMode";
 const ALWAYS_ON_TOP_KEY = "codex-usage-limiter.alwaysOnTop";
@@ -41,7 +46,7 @@ const MODE_WINDOWS: Record<WindowMode, { width: number; height: number; minWidth
   mini: { width: 320, height: 168, minWidth: 320, minHeight: 168, resizable: false },
   pill: { width: 280, height: 72, minWidth: 280, minHeight: 72, resizable: false },
 };
-const SETTINGS_WINDOW = { width: 420, height: 500, minWidth: 420, minHeight: 500, resizable: false };
+const SETTINGS_WINDOW = { width: 420, height: 560, minWidth: 420, minHeight: 560, resizable: false };
 
 const windowModeOptions: Array<{ value: WindowMode; label: string; dims: string }> = [
   { value: "compact", label: "Compact", dims: "420 × 240" },
@@ -143,6 +148,8 @@ export function UsageLimiterApp() {
   const [draftAppearance, setDraftAppearance] = useState<Appearance>(appearance);
   const [draftWindowMode, setDraftWindowMode] = useState<WindowMode>(windowMode);
   const [draftAlwaysOnTop, setDraftAlwaysOnTop] = useState<boolean>(alwaysOnTop);
+  const [autostart, setAutostartState] = useState(false);
+  const [draftAutostart, setDraftAutostart] = useState(false);
   const barRef = useRef<HTMLDivElement | null>(null);
   const dragValue = useRef<number | null>(null);
 
@@ -166,6 +173,15 @@ export function UsageLimiterApp() {
   }, [load]);
 
   useEffect(() => {
+    getAutostart()
+      .then((enabled) => {
+        setAutostartState(enabled);
+        setDraftAutostart(enabled);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     document.documentElement.dataset.appearance = appearance;
     localStorage.setItem(APPEARANCE_KEY, appearance);
   }, [appearance]);
@@ -184,6 +200,11 @@ export function UsageLimiterApp() {
         const appWindow = getCurrentWindow();
         const target = screen === "settings" ? SETTINGS_WINDOW : MODE_WINDOWS[windowMode];
         await appWindow.setAlwaysOnTop(alwaysOnTop);
+        if (IS_MAC) {
+          // Pill has no titlebar; hide the traffic lights with it. Windows and
+          // Linux are already borderless via config, so never touch them here.
+          await appWindow.setDecorations(screen === "settings" || windowMode !== "pill");
+        }
         await appWindow.setResizable(screen === "monitor" && target.resizable);
         await appWindow.setMinSize(new LogicalSize(target.minWidth, target.minHeight));
         await appWindow.setSize(new LogicalSize(target.width, target.height));
@@ -355,6 +376,13 @@ export function UsageLimiterApp() {
     persistFloor(clampRemainingFloor(floor + delta));
   }, [busy, persistFloor, floor]);
 
+  useEffect(() => {
+    const tooltip = activeWindow
+      ? `${remaining}% left · ${formatResetShort(activeWindow.resetsAt)}`
+      : "Codex Usage Limiter";
+    void setTrayUsageTooltip(tooltip).catch(() => undefined);
+  }, [activeWindow, remaining]);
+
   if (!draft || !settings) {
     return (
       <main className="limiter-window limiter-window--loading" data-mode={windowMode}>
@@ -371,6 +399,7 @@ export function UsageLimiterApp() {
     setDraftAppearance(appearance);
     setDraftWindowMode(windowMode);
     setDraftAlwaysOnTop(alwaysOnTop);
+    setDraftAutostart(autostart);
     setError(null);
     setNotice(null);
     setScreen("settings");
@@ -380,12 +409,22 @@ export function UsageLimiterApp() {
     setDraftAppearance(appearance);
     setDraftWindowMode(windowMode);
     setDraftAlwaysOnTop(alwaysOnTop);
+    setDraftAutostart(autostart);
     setError(null);
     setScreen("monitor");
   };
   const saveSettings = async () => {
     const saved = await persistDraft(draft);
     if (!saved) return;
+    if (draftAutostart !== autostart) {
+      try {
+        await setAutostart(draftAutostart);
+        setAutostartState(draftAutostart);
+      } catch (autostartError) {
+        setError(String(autostartError));
+        return;
+      }
+    }
     setAppearance(draftAppearance);
     setWindowMode(draftWindowMode);
     setAlwaysOnTop(draftAlwaysOnTop);
@@ -458,7 +497,7 @@ export function UsageLimiterApp() {
   const showTitlebar = screen === "settings" || windowMode !== "pill";
 
   return (
-    <main className="limiter-window" data-mode={windowMode} data-screen={screen}>
+    <main className="limiter-window" data-mode={windowMode} data-screen={screen} data-platform={IS_MAC ? "mac" : "other"}>
       {showTitlebar ? (
         <header className="limiter-titlebar" data-tauri-drag-region>
           <div className="limiter-titlebar__brand" data-tauri-drag-region>
@@ -483,8 +522,12 @@ export function UsageLimiterApp() {
             {screen === "monitor" ? (
               <button type="button" aria-label="Open settings" onClick={openSettings}><Settings /></button>
             ) : null}
-            <button type="button" aria-label="Minimize window" onClick={() => void appWindow().minimize()}><Minus /></button>
-            <button type="button" aria-label="Close window" onClick={() => void appWindow().close()}><X /></button>
+            {IS_MAC ? null : (
+              <>
+                <button type="button" aria-label="Minimize window" onClick={() => void appWindow().minimize()}><Minus /></button>
+                <button type="button" aria-label="Close window" onClick={() => void appWindow().close()}><X /></button>
+              </>
+            )}
           </div>
         </header>
       ) : null}
@@ -676,6 +719,24 @@ export function UsageLimiterApp() {
                     checked={draftAlwaysOnTop}
                     onChange={(event) => setDraftAlwaysOnTop(event.target.checked)}
                     aria-label="Keep in foreground"
+                  />
+                  <span aria-hidden="true" />
+                </span>
+              </label>
+            </section>
+
+            <section className="limiter-settings-row limiter-settings-row--foreground">
+              <div>
+                <h2>Start at login</h2>
+                <p>Launch automatically when you sign in</p>
+              </div>
+              <label className="limiter-enabled-control">
+                <span className="reference-switch">
+                  <input
+                    type="checkbox"
+                    checked={draftAutostart}
+                    onChange={(event) => setDraftAutostart(event.target.checked)}
+                    aria-label="Start at login"
                   />
                   <span aria-hidden="true" />
                 </span>

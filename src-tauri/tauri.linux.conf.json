@@ -3,12 +3,11 @@
     "windows": [
       {
         "title": "Codex Usage Limiter",
-        "width": 820,
-        "height": 600,
-        "minWidth": 680,
-        "minHeight": 520,
-        "titleBarStyle": "Visible",
-        "hiddenTitle": false,
+        "width": 420,
+        "height": 240,
+        "minWidth": 380,
+        "minHeight": 220,
+        "decorations": false,
         "transparent": false,
         "devtools": true,
         "windowEffects": null

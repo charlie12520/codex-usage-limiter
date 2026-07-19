@@ -877,6 +877,18 @@ export async function updateAppSettings(settings: AppSettings): Promise<AppSetti
   return invoke<AppSettings>("update_app_settings", { settings });
 }
 
+export async function setTrayUsageTooltip(tooltip: string): Promise<void> {
+  return invoke("set_tray_usage_tooltip", { tooltip });
+}
+
+export async function getAutostart(): Promise<boolean> {
+  return invoke<boolean>("get_autostart");
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  return invoke("set_autostart", { enabled });
+}
+
 export async function quotaGuardGetState(): Promise<QuotaGuardPublicState> {
   return invoke<QuotaGuardPublicState>("quota_guard_get_state");
 }
