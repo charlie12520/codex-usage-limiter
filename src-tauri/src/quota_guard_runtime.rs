@@ -505,7 +505,17 @@ async fn run_effect(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, 
                             .and_then(|snapshot| snapshot.window(*window))
                             .map(|window| window.used_percent)
                             .unwrap_or(*threshold_percent);
-                        let reset_time = resets_at.map(|seconds| seconds.to_string()).unwrap_or_else(|| "when the quota service reports a reset".into());
+                        let reset_time = resets_at.map(|seconds| {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|elapsed| elapsed.as_secs() as i64)
+                                .unwrap_or(0);
+                            let minutes = ((seconds - now).max(0) + 59) / 60;
+                            let (days, hours, mins) = (minutes / 1440, (minutes % 1440) / 60, minutes % 60);
+                            if days > 0 { format!("in {days}d {hours}h {mins}m") }
+                            else if hours > 0 { format!("in {hours}h {mins}m") }
+                            else { format!("in {mins}m") }
+                        }).unwrap_or_else(|| "when the quota service reports a reset".into());
                         (window_name, observed_percent, *threshold_percent, reset_time)
                     }
                 }

@@ -13,15 +13,16 @@ pub(crate) const QUOTA_GUARD_NOTIFICATION_OPEN_ACTION: &str = "open-quota-guard"
 pub(crate) const QUOTA_GUARD_NOTIFICATION_ROUTE_KEY: &str = "quotaGuardRoute";
 
 /// Formats the breach details that make a quota notification actionable.
+/// Speaks in "% remaining" to match the limiter UI; inputs are used-%.
 pub(crate) fn quota_guard_breach_body(
     window_name: &str,
     observed_percent: u8,
     threshold_percent: u8,
     reset_time: &str,
 ) -> String {
-    format!(
-        "{window_name}: {observed_percent}% used (threshold {threshold_percent}%). Resets {reset_time}."
-    )
+    let remaining = 100u8.saturating_sub(observed_percent);
+    let floor = 100u8.saturating_sub(threshold_percent);
+    format!("{window_name}: {remaining}% left (floor {floor}%). Resets {reset_time}.")
 }
 
 /// Delivers a durable quota-breach notification.
@@ -84,31 +85,54 @@ fn send_windows_quota_guard_notification(
     app: &tauri::AppHandle,
     title: &str,
     body: &str,
-    route: &str,
+    _route: &str,
 ) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
-    use tauri_winrt_notification::Toast;
+    use windows::core::HSTRING;
+    use windows::UI::Notifications::{
+        ToastNotification, ToastNotificationManager, ToastTemplateType,
+    };
 
-    let activation_argument = format!("{QUOTA_GUARD_NOTIFICATION_OPEN_ACTION}:{route}");
-    let activation_app = app.clone();
-    Toast::new(&app.config().identifier)
-        .title(title)
-        .text1(body)
-        .add_button("Open usage limiter", &activation_argument)
-        .on_activated(move |action| {
-            if is_quota_guard_windows_activation(action.as_deref(), &activation_argument) {
-                if let Some(window) = activation_app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    let _ = window.emit("quota-guard-open-panel", ());
-                } else {
-                    let _ = activation_app.emit("quota-guard-open-panel", ());
-                }
-            }
-            Ok(())
-        })
-        .show()
-        .map_err(|error| error.to_string())
+    // Uses the legacy ToastText02 template on purpose: Windows banners legacy
+    // templates for registry-registered AUMIDs, but silently routes modern
+    // ToastGeneric payloads from unpackaged apps straight to the notification
+    // center without ever showing a banner (verified empirically 2026-07-18).
+    let err = |error: windows::core::Error| error.to_string();
+    let xml = ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)
+        .map_err(err)?;
+    let texts = xml.GetElementsByTagName(&HSTRING::from("text")).map_err(err)?;
+    texts
+        .Item(0)
+        .map_err(err)?
+        .AppendChild(&xml.CreateTextNode(&HSTRING::from(title)).map_err(err)?)
+        .map_err(err)?;
+    texts
+        .Item(1)
+        .map_err(err)?
+        .AppendChild(&xml.CreateTextNode(&HSTRING::from(body)).map_err(err)?)
+        .map_err(err)?;
+    let toast = ToastNotification::CreateToastNotification(&xml).map_err(err)?;
+    ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
+        app.config().identifier.as_str(),
+    ))
+    .map_err(err)?
+    .Show(&toast)
+    .map_err(err)
+}
+
+/// Registers this app's AppUserModelId in HKCU so WinRT toasts actually
+/// display. Unpackaged exes have no installer to do this; without the entry
+/// Windows accepts and then silently drops every toast.
+#[cfg(target_os = "windows")]
+pub(crate) fn register_windows_toast_identity(identifier: &str, display_name: &str) {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let key = format!(r"HKCU\Software\Classes\AppUserModelId\{identifier}");
+    let _ = Command::new("reg")
+        .args(["add", &key, "/v", "DisplayName", "/t", "REG_SZ", "/d", display_name, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
 }
 #[tauri::command]
 pub(crate) async fn is_macos_debug_build() -> bool {
@@ -172,7 +196,7 @@ mod tests {
     fn breach_body_names_the_window_usage_threshold_and_reset_time() {
         assert_eq!(
             quota_guard_breach_body("five-hour window", 92, 90, "at 15:30"),
-            "five-hour window: 92% used (threshold 90%). Resets at 15:30."
+            "five-hour window: 8% left (floor 10%). Resets at 15:30."
         );
     }
 

@@ -115,6 +115,11 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(target_os = "windows")]
+            notifications::register_windows_toast_identity(
+                &app.config().identifier,
+                app.config().product_name.as_deref().unwrap_or("Codex Usage Limiter"),
+            );
             let state = state::AppState::load(&app.handle());
             app.manage(state);
             {
