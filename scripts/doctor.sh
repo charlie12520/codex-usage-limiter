@@ -6,9 +6,11 @@ if [ "${1:-}" = "--strict" ]; then
   STRICT=1
 fi
 
+# The whisper/cpal dictation stack (which needed CMake) is gone; building now
+# only needs Node and a stable Rust toolchain.
 missing=""
-if ! command -v cmake >/dev/null 2>&1; then
-  missing="cmake"
+if ! command -v cargo >/dev/null 2>&1; then
+  missing="rust (cargo)"
 fi
 
 if [ -z "$missing" ]; then
@@ -17,24 +19,7 @@ if [ -z "$missing" ]; then
 fi
 
 echo "Doctor: missing dependencies: $missing"
-
-case "$(uname -s)" in
-  Darwin)
-    echo "Install: brew install cmake"
-    ;;
-  Linux)
-    echo "Ubuntu/Debian: sudo apt-get install cmake"
-    echo "Fedora: sudo dnf install cmake"
-    echo "Arch: sudo pacman -S cmake"
-    ;;
-  MINGW*|MSYS*|CYGWIN*)
-    echo "Install: choco install cmake"
-    echo "Or download from: https://cmake.org/download/"
-    ;;
-  *)
-    echo "Install CMake from: https://cmake.org/download/"
-    ;;
-esac
+echo "Install Rust from: https://rustup.rs/"
 
 if [ "$STRICT" -eq 1 ]; then
   exit 1

@@ -42,9 +42,10 @@ function hasCommand(command) {
   return false;
 }
 
+// The whisper/cpal dictation stack (which needed CMake + LLVM) is gone;
+// building now only needs Node and a stable Rust toolchain.
 const missing = [];
-if (!hasCommand("cmake")) missing.push("cmake");
-if (process.platform === "win32" && !hasCommand("clang")) missing.push("llvm");
+if (!hasCommand("cargo")) missing.push("rust (cargo)");
 
 if (missing.length === 0) {
   console.log("Doctor: OK");
@@ -52,24 +53,6 @@ if (missing.length === 0) {
 }
 
 console.log(`Doctor: missing dependencies: ${missing.join(" ")}`);
-
-switch (process.platform) {
-  case "darwin":
-    console.log("Install: brew install cmake");
-    break;
-  case "linux":
-    console.log("Ubuntu/Debian: sudo apt-get install cmake");
-    console.log("Fedora: sudo dnf install cmake");
-    console.log("Arch: sudo pacman -S cmake");
-    break;
-  case "win32":
-    console.log("Install: choco install cmake llvm");
-    console.log("Or download from: https://cmake.org/download/");
-    console.log("If bindgen fails, set LIBCLANG_PATH to your LLVM bin directory.");
-    break;
-  default:
-    console.log("Install CMake from: https://cmake.org/download/");
-    break;
-}
+console.log("Install Rust from: https://rustup.rs/");
 
 process.exit(strict ? 1 : 0);

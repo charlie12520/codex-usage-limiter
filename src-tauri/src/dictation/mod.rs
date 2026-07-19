@@ -1,5 +1,8 @@
-#[cfg_attr(any(target_os = "ios", target_os = "android"), path = "stub.rs")]
-#[cfg_attr(not(any(target_os = "ios", target_os = "android")), path = "real.rs")]
+// The limiter has no microphone UI; the whisper/cpal dictation stack is dead
+// code here and its native build chain (libclang + CMake) was the single
+// biggest obstacle for anyone building from source. All platforms use the
+// stub, which keeps the command surface intact.
+#[path = "stub.rs"]
 mod imp;
 
 pub(crate) use imp::*;
