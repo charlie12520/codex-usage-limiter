@@ -27,12 +27,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
-
-      - name: Build exe
-        working-directory: src-tauri
-        run: cargo build --release --bin codex-usage-limiter --features custom-protocol
+      - name: Build app and installer
+        run: npm run tauri -- build --bundles nsis
 
       - name: Run backend tests
         working-directory: src-tauri
@@ -43,12 +39,15 @@ jobs:
         run: |
           $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { 'dev' }
           Compress-Archive -Path src-tauri/target/release/codex-usage-limiter.exe -DestinationPath "codex-usage-limiter-$name-windows-x64.zip"
+          Copy-Item (Get-Item "src-tauri/target/release/bundle/nsis/*-setup.exe").FullName "codex-usage-limiter-$name-windows-x64-setup.exe"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: codex-usage-limiter-windows-x64
-          path: codex-usage-limiter-*-windows-x64.zip
+          path: |
+            codex-usage-limiter-*-windows-x64.zip
+            codex-usage-limiter-*-windows-x64-setup.exe
 
       - name: Attach to release
         if: github.ref_type == 'tag'
@@ -56,11 +55,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $zip = (Get-Item codex-usage-limiter-*-windows-x64.zip).FullName
-          gh release upload "$env:GITHUB_REF_NAME" $zip --clobber 2>$null
+          $files = @(Get-Item codex-usage-limiter-*-windows-x64.zip; Get-Item codex-usage-limiter-*-windows-x64-setup.exe) | ForEach-Object { $_.FullName }
+          gh release upload "$env:GITHUB_REF_NAME" @files --clobber 2>$null
           if ($LASTEXITCODE -ne 0) {
             gh release create "$env:GITHUB_REF_NAME" --title "Codex Usage Limiter $env:GITHUB_REF_NAME" --generate-notes 2>$null
-            gh release upload "$env:GITHUB_REF_NAME" $zip --clobber
+            gh release upload "$env:GITHUB_REF_NAME" @files --clobber
           }
 
   macos:

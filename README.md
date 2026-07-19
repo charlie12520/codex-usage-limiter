@@ -35,7 +35,7 @@ Compact keeps every control on the surface. Mini is a glance card. Pill is a tit
 
 Grab a build from the [latest release](../../releases/latest):
 
-- **Windows** (primary, fully tested): unzip and run `codex-usage-limiter.exe`. Windows 10/11.
+- **Windows** (primary, fully tested): run the `-setup.exe` installer — it adds the app to the Start Menu so Windows search finds it, and installs per-user without admin rights. Prefer a portable copy instead? Grab the zip and run `codex-usage-limiter.exe` from anywhere (portable exes aren't indexed by Start Menu search). Windows 10/11.
 - **macOS** (experimental, unsigned): open the `.dmg`, drag the app to Applications, then right-click → Open the first time to get past Gatekeeper.
 - **Linux** (experimental): `.AppImage` (chmod +x and run) or `.deb`.
 
