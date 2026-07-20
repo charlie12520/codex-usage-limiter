@@ -425,6 +425,8 @@ pub(crate) struct QuotaGuardSettings {
     pub(crate) reset_grace_minutes: u16,
     #[serde(default = "default_notify_when_available")]
     pub(crate) notify_when_available: bool,
+    #[serde(default)]
+    pub(crate) external_suspend: bool,
 }
 
 impl Default for QuotaGuardSettings {
@@ -439,6 +441,7 @@ impl Default for QuotaGuardSettings {
             drain_timeout_action: DrainTimeoutAction::NotifyAndHold,
             reset_grace_minutes: default_reset_grace_minutes(),
             notify_when_available: default_notify_when_available(),
+            external_suspend: false,
         }
     }
 }

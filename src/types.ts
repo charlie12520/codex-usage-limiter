@@ -254,6 +254,7 @@ export type QuotaGuardSettings = {
   drainTimeoutAction: DrainTimeoutAction;
   resetGraceMinutes: number;
   notifyWhenAvailable: boolean;
+  externalSuspend?: boolean;
 };
 
 export type AppSettings = {

@@ -94,6 +94,16 @@ export function SettingsQuotaGuardSection({ appSettings, onUpdateAppSettings }: 
       <SettingsToggleRow title="Notify when available" subtitle="Send a notification after a verified quota reset.">
         <SettingsToggleSwitch pressed={quotaGuard.notifyWhenAvailable} onClick={() => update({ notifyWhenAvailable: !quotaGuard.notifyWhenAvailable })} />
       </SettingsToggleRow>
+      <SettingsToggleRow
+        title="Also suspend external Codex engines (desktop app / CLI)"
+        subtitle="Frozen apps look hung until the quota guard resumes them."
+      >
+        <SettingsToggleSwitch
+          pressed={quotaGuard.externalSuspend === true}
+          disabled={remoteIncompatible}
+          onClick={() => update({ externalSuspend: quotaGuard.externalSuspend !== true })}
+        />
+      </SettingsToggleRow>
     </SettingsSection>
   );
 }

@@ -80,9 +80,22 @@ pub(crate) enum EpisodeKey {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EpisodePolicy {
     pub(crate) action: QuotaAction,
+    #[serde(default)]
+    pub(crate) external_suspend: bool,
     pub(crate) drain_timeout_minutes: u16,
     pub(crate) drain_timeout_action: DrainTimeoutAction,
     pub(crate) reset_grace_minutes: u16,
+}
+
+/// A resume is allowed only when this still identifies the same OS process,
+/// preventing PID reuse from affecting an unrelated program after restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SuspendedExternalEngine {
+    pub(crate) pid: u32,
+    pub(crate) process_start_time: u64,
+    pub(crate) image_path: String,
+    pub(crate) suspended_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +197,8 @@ pub(crate) struct AccountRuntime {
     pub(crate) terminal_observations: Vec<TerminalObservation>,
     #[serde(default)]
     pub(crate) activity_entries: Vec<QuotaGuardActivityEntry>,
+    #[serde(default)]
+    pub(crate) suspended_external_engines: Vec<SuspendedExternalEngine>,
     pub(crate) allowed_drain_turns: Vec<TurnKey>,
     /// Canonical exact-turn index. Every interrupt lifecycle transition is
     /// keyed by the immutable session/workspace/thread/turn identity.
@@ -223,6 +238,9 @@ pub(crate) enum QuotaGuardActivityKind {
     InterruptAcknowledged,
     InterruptCompleted,
     MonitorError,
+    ExternalEngineSuspended,
+    ExternalEngineResumed,
+    ExternalEngineSkipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +273,7 @@ impl AccountRuntime {
             pending_local_starts: BTreeMap::new(),
             terminal_observations: Vec::new(),
             activity_entries: Vec::new(),
+            suspended_external_engines: Vec::new(),
             allowed_drain_turns: Vec::new(),
             pending_interrupt_index: BTreeMap::new(),
             drain_deadline: None,

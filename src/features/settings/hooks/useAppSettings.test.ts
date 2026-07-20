@@ -44,6 +44,7 @@ describe("useAppSettings", () => {
       drainTimeoutAction: "notifyAndHold",
       resetGraceMinutes: 10,
       notifyWhenAvailable: true,
+      externalSuspend: false,
     });
     expect(
       normalizeAppSettings({ ...defaults, quotaGuard: undefined as never }).quotaGuard,

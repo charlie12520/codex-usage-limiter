@@ -35,6 +35,7 @@ export function QuotaGuardPanel({
 }: Props) {
   const breachedWindows = state?.breachedWindows ?? [];
   const affectedTurns = state?.affectedTurns ?? [];
+  const suspendedExternalEngines = state?.suspendedExternalEngines ?? [];
   const activity = state?.activity ?? [];
   const activeAdmission = admissionForWorkspace(state, activeWorkspaceId);
   const workspaceAdmissions = activeWorkspaceId
@@ -100,6 +101,16 @@ export function QuotaGuardPanel({
               <div className="settings-field">
                 <div className="settings-field-label">Affected turns</div>
                 {affectedTurns.map((turn) => <div key={`${turn.workspaceId}:${turn.threadId}:${turn.turnId}`} className="settings-help">{turn.workspaceId} · {turn.threadId} · {turn.turnId}</div>)}
+              </div>
+            ) : null}
+            {suspendedExternalEngines.length > 0 ? (
+              <div className="settings-field">
+                <div className="settings-field-label">Suspended external engines ({suspendedExternalEngines.length})</div>
+                {suspendedExternalEngines.map((engine) => (
+                  <div key={`${engine.pid}:${engine.suspendedAt}`} className="settings-help">
+                    {engine.imagePath} Â· PID {engine.pid} Â· since {formatQuotaGuardTimestamp(engine.suspendedAt)}
+                  </div>
+                ))}
               </div>
             ) : null}
             {controls.applyActionNow ? <button type="button" className="primary" onClick={() => void onApplyActionNow()}>Apply action now</button> : null}

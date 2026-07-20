@@ -16,7 +16,13 @@ pub(crate) fn recover(enabled: bool, loaded: LoadRuntime, now_ms: i64) -> Recove
         return RecoveryDecision { state: QuotaGuardRuntimeState::default(), policy: ProcessPolicy::DisabledOpen, requires_bootstrap: false };
     }
     match loaded {
-        LoadRuntime::Valid(state) if !matches!(state.account.as_ref().map(|account| account.phase), None | Some(QuotaGuardPhase::Disabled)) => RecoveryDecision { state, policy: ProcessPolicy::EnabledClosed, requires_bootstrap: true },
+        LoadRuntime::Valid(mut state) if !matches!(state.account.as_ref().map(|account| account.phase), None | Some(QuotaGuardPhase::Disabled)) => {
+            if let Some(account) = state.account.as_mut().filter(|account| account.phase == QuotaGuardPhase::InterventionRequired) {
+                account.last_error.get_or_insert_with(|| "recovered intervention requires verification".into());
+                account.updated_at = now_ms;
+            }
+            RecoveryDecision { state, policy: ProcessPolicy::EnabledClosed, requires_bootstrap: true }
+        }
         LoadRuntime::Corrupt { .. } => {
             let mut state = QuotaGuardRuntimeState::default();
             state.account = Some(AccountRuntime::new(String::new(), now_ms));

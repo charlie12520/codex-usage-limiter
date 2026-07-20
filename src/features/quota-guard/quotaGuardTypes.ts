@@ -22,7 +22,10 @@ export type QuotaGuardActivityKind =
   | "interruptRequested"
   | "interruptAcknowledged"
   | "interruptCompleted"
-  | "monitorError";
+  | "monitorError"
+  | "externalEngineSuspended"
+  | "externalEngineResumed"
+  | "externalEngineSkipped";
 
 export type QuotaGuardActivityEntry = {
   id: string | null;
@@ -40,6 +43,12 @@ export type QuotaGuardTurn = {
   workspaceId: string;
   threadId: string;
   turnId: string;
+};
+
+export type QuotaGuardSuspendedEngine = {
+  pid: number;
+  imagePath: string;
+  suspendedAt: number;
 };
 
 export type AdmissionReason =
@@ -67,6 +76,7 @@ export type QuotaGuardPublicState = {
   verifyAt: number | null;
   monitorHealthy: boolean;
   lastError: string | null;
+  suspendedExternalEngines?: QuotaGuardSuspendedEngine[];
   activity: QuotaGuardActivityEntry[];
   admissionByWorkspace: Record<string, QuotaGuardAdmission>;
 };

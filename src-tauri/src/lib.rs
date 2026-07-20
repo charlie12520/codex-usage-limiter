@@ -60,6 +60,10 @@ fn keep_daemon_running_after_close(app_handle: &tauri::AppHandle) -> bool {
 #[cfg(desktop)]
 async fn stop_managed_daemons_for_exit(app_handle: tauri::AppHandle) {
     let state = app_handle.state::<state::AppState>();
+    quota_guard_runtime::resume_external_engines_for_shutdown(
+        &state.quota_guard,
+        &state.quota_guard_state_path,
+    ).await;
     let _ = tailscale::tailscale_daemon_stop(state).await;
 }
 

@@ -17,7 +17,7 @@ It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMo
 - The green titlebar switch arms/disarms responses. Disarmed, the app keeps tracking and displaying usage but takes no action.
 - Persists quota state, owned-turn identities, deadlines, and reset verification across restarts, and revalidates account identity before reopening inference.
 
-The limiter controls only Codex sessions launched through this application. It does not control separate terminals or other Codex clients — but it tracks and displays account-level usage regardless of where you spend it.
+The limiter controls Codex sessions launched through this application. When **Also suspend external Codex engines** is enabled, an enforcing episode also freezes matching local, current-user Codex desktop-app and CLI engines until reset verification or resolve. This can make those apps look hung. It cannot reach Codex in WSL, containers, remote/SSH machines, or the web, though account-level usage remains visible.
 
 ## Window modes
 

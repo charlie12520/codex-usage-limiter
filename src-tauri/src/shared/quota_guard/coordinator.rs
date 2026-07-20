@@ -353,6 +353,7 @@ pub(crate) struct QuotaGuardPublicState {
     pub(crate) verify_at: Option<i64>,
     pub(crate) monitor_healthy: bool,
     pub(crate) last_error: Option<String>,
+    pub(crate) suspended_external_engines: Vec<QuotaGuardPublicSuspendedEngine>,
     pub(crate) activity: Vec<QuotaGuardPublicActivityEntry>,
     pub(crate) admission_by_workspace: BTreeMap<String, AdmissionProjection>,
 }
@@ -363,6 +364,14 @@ pub(crate) struct QuotaGuardPublicTurn {
     pub(crate) workspace_id: String,
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QuotaGuardPublicSuspendedEngine {
+    pub(crate) pid: u32,
+    pub(crate) image_path: String,
+    pub(crate) suspended_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

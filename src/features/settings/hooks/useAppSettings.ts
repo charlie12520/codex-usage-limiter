@@ -37,6 +37,7 @@ const DEFAULT_QUOTA_GUARD_SETTINGS: AppSettings["quotaGuard"] = {
   drainTimeoutAction: "notifyAndHold",
   resetGraceMinutes: 10,
   notifyWhenAvailable: true,
+  externalSuspend: false,
 };
 
 function normalizeInteger(
@@ -92,6 +93,7 @@ function normalizeQuotaGuardSettings(value: unknown): AppSettings["quotaGuard"] 
       1440,
     ),
     notifyWhenAvailable: settings.notifyWhenAvailable !== false,
+    externalSuspend: settings.externalSuspend === true,
   };
 }
 

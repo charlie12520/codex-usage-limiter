@@ -1,5 +1,6 @@
 pub(crate) mod coordinator;
 pub(crate) mod evaluator;
+pub(crate) mod external_suspend;
 pub(crate) mod gate;
 pub(crate) mod model;
 pub(crate) mod parser;
