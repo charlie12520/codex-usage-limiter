@@ -118,7 +118,7 @@ beforeEach(() => {
     applyActionNow: vi.fn(),
     keepWaiting: vi.fn(),
     interruptNow: vi.fn(),
-    verifyNow: vi.fn(),
+    rearm: vi.fn(),
     resolveIntervention: vi.fn(),
     resumeQueuedSends: vi.fn(),
     requireQueueResume: vi.fn(),
@@ -258,7 +258,7 @@ describe("UsageLimiterApp", () => {
       applyActionNow: vi.fn(),
       keepWaiting: vi.fn(),
       interruptNow: vi.fn(),
-      verifyNow: vi.fn(),
+      rearm: vi.fn(),
       resolveIntervention: vi.fn(),
       resumeQueuedSends: vi.fn(),
       requireQueueResume: vi.fn(),
@@ -266,7 +266,7 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
-    expect(screen.getByText("Stale reading — refresh for current usage")).toBeTruthy();
+    expect(screen.getByText("Stale reading — waiting for the next update")).toBeTruthy();
     expect(screen.getByText("37%").className).toContain("is-stale");
   });
 

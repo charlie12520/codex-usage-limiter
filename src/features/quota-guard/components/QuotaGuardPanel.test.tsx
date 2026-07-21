@@ -28,7 +28,7 @@ describe("QuotaGuardPanel", () => {
         onApplyActionNow={async () => staleProjection}
         onKeepWaiting={async () => staleProjection}
         onInterruptNow={async () => staleProjection}
-        onVerifyNow={async () => staleProjection}
+        onRearm={async () => staleProjection}
         onResolve={async () => staleProjection}
         onResumeQueuedSends={vi.fn()}
       />,
@@ -73,7 +73,7 @@ describe("QuotaGuardPanel", () => {
         onApplyActionNow={async () => state}
         onKeepWaiting={async () => state}
         onInterruptNow={async () => state}
-        onVerifyNow={async () => state}
+        onRearm={async () => state}
         onResolve={async () => state}
         onResumeQueuedSends={vi.fn()}
       />,
@@ -112,6 +112,7 @@ describe("QuotaGuardPanel", () => {
       lastError: null,
     } satisfies QuotaGuardPublicState;
     const onResolve = vi.fn(async () => disabled);
+    const onRearm = vi.fn(async () => intervention);
 
     const { container, rerender } = render(
       <QuotaGuardPanel
@@ -122,12 +123,15 @@ describe("QuotaGuardPanel", () => {
         onApplyActionNow={async () => intervention}
         onKeepWaiting={async () => intervention}
         onInterruptNow={async () => intervention}
-        onVerifyNow={async () => intervention}
+        onRearm={onRearm}
         onResolve={onResolve}
         onResumeQueuedSends={vi.fn()}
       />,
     );
     const panel = within(container);
+
+    fireEvent.click(panel.getByRole("button", { name: "Rearm" }));
+    expect(onRearm).toHaveBeenCalledOnce();
 
     fireEvent.click(panel.getByRole("button", { name: "Disable guard and open" }));
     expect(onResolve).toHaveBeenCalledWith("disableGuard");
@@ -142,7 +146,7 @@ describe("QuotaGuardPanel", () => {
         onApplyActionNow={async () => intervention}
         onKeepWaiting={async () => intervention}
         onInterruptNow={async () => intervention}
-        onVerifyNow={async () => intervention}
+        onRearm={onRearm}
         onResolve={onResolve}
         onResumeQueuedSends={vi.fn()}
       />,
@@ -160,13 +164,14 @@ describe("QuotaGuardPanel", () => {
         onApplyActionNow={async () => intervention}
         onKeepWaiting={async () => intervention}
         onInterruptNow={async () => intervention}
-        onVerifyNow={async () => intervention}
+        onRearm={onRearm}
         onResolve={onResolve}
         onResumeQueuedSends={vi.fn()}
       />,
     );
 
-    expect(panel.getByRole("button", { name: "Verify now" })).toBeTruthy();
+    expect(panel.getByRole("button", { name: "Rearm" })).toBeTruthy();
+    expect(panel.queryByRole("button", { name: "Verify now" })).toBeNull();
     expect(panel.queryByRole("button", { name: "Disable guard and open" })).toBeNull();
   });
 });

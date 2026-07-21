@@ -36,6 +36,9 @@ pub(crate) enum ReducerEvent {
     SettingsChanged { thresholds_changed: bool },
     Snapshot { snapshot: RateLimitSnapshot, full_read: bool, verification: bool, now_ms: i64 },
     ApplyActionNow { now_ms: i64 },
+    /// Ends an active enforcement episode without clearing its fired keys.
+    /// The normal threshold hysteresis or reset observation re-arms those keys.
+    Rearm { now_ms: i64 },
     FinalizeClosedEpisode { transition_id: u64, now_ms: i64 },
     DrainDeadline { generation: u64, now_ms: i64 },
     ForceInterrupt { now_ms: i64 },
@@ -543,6 +546,46 @@ pub(crate) fn reduce(mut runtime: QuotaGuardRuntimeState, event: ReducerEvent, s
                 }
             }
         }
+        ReducerEvent::Rearm { now_ms } => {
+            let Some(phase) = runtime.account.as_ref().map(|account| account.phase) else {
+                return (runtime, effects);
+            };
+            if !matches!(phase,
+                QuotaGuardPhase::Parked
+                    | QuotaGuardPhase::VerifyingReset
+                    | QuotaGuardPhase::Draining
+                    | QuotaGuardPhase::AwaitingDrainDecision
+                    | QuotaGuardPhase::Interrupting
+                    | QuotaGuardPhase::InterventionRequired
+            ) {
+                return (runtime, effects);
+            }
+            if !increment_generation(&mut runtime) {
+                if let Some(account) = runtime.account.as_mut() {
+                    enter_intervention(account, now_ms, "lifecycle generation overflow");
+                }
+                effects.push(ReducerEffect::SetProcessClosed);
+                return (runtime, effects);
+            }
+            let Some(account) = runtime.account.as_mut() else { return (runtime, effects) };
+            account.phase = QuotaGuardPhase::Monitoring;
+            account.revalidation_return_phase = None;
+            account.breached_windows.clear();
+            // Deliberately retain fired_episodes: an unchanged snapshot must
+            // not immediately recreate the episode that was just released.
+            account.episode_policy = None;
+            account.pending_local_starts.clear();
+            account.unmatched_started_turns.clear();
+            account.terminal_observations.clear();
+            account.allowed_drain_turns.clear();
+            account.pending_interrupt_index.clear();
+            account.drain_deadline = None;
+            account.verify_at = None;
+            account.last_error = None;
+            account.updated_at = now_ms;
+            effects.push(ReducerEffect::ResumeExternalEngines);
+            effects.push(ReducerEffect::SetProcessOpen);
+        }
         ReducerEvent::FinalizeClosedEpisode { transition_id, now_ms } => {
             if transition_id != runtime.lifecycle_generation { return (runtime, effects); }
             let operation_id = match next_operation_id(&mut runtime) {
@@ -1041,6 +1084,56 @@ mod tests {
         assert!(ready_effects.iter().any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
         let (_, disabled_effects) = reduce(runtime, ReducerEvent::Disable { now_ms: 3 }, &settings);
         assert!(disabled_effects.iter().any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
+    }
+
+    #[test]
+    fn rearm_while_parked_reopens_admission_without_refiring_unchanged_usage() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.action = QuotaAction::InterruptImmediately;
+        settings.external_suspend = true;
+        let (runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &settings);
+        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(89, false), full_read: true, verification: false, now_ms: 10_000 }, &settings);
+        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001 }, &settings);
+        let generation = runtime.lifecycle_generation;
+        let (runtime, _) = reduce(runtime, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: 10_001 }, &settings);
+        assert_eq!(runtime.account.as_ref().map(|account| account.phase), Some(QuotaGuardPhase::Parked));
+
+        let (runtime, effects) = reduce(runtime, ReducerEvent::Rearm { now_ms: 10_002 }, &settings);
+        let account = runtime.account.as_ref().expect("account");
+        assert_eq!(account.phase, QuotaGuardPhase::Monitoring);
+        assert!(account.breached_windows.is_empty());
+        assert!(account.verify_at.is_none());
+        assert!(account.episode_policy.is_none());
+        assert_eq!(account.fired_episodes.len(), 1);
+        assert!(effects.contains(&ReducerEffect::ResumeExternalEngines));
+        assert!(effects.contains(&ReducerEffect::SetProcessOpen));
+
+        let (_, unchanged_effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_003 }, &settings);
+        assert!(!unchanged_effects.iter().any(|effect| matches!(
+            effect,
+            ReducerEffect::SetProcessClosed
+                | ReducerEffect::SuspendExternalEngines
+                | ReducerEffect::Notify { .. }
+        )));
+    }
+
+    #[test]
+    fn rearm_allows_a_fresh_crossing_after_hysteresis() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.action = QuotaAction::InterruptImmediately;
+        let (runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &settings);
+        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(89, false), full_read: true, verification: false, now_ms: 10_000 }, &settings);
+        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001 }, &settings);
+        let generation = runtime.lifecycle_generation;
+        let (runtime, _) = reduce(runtime, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: 10_001 }, &settings);
+        let (runtime, _) = reduce(runtime, ReducerEvent::Rearm { now_ms: 10_002 }, &settings);
+
+        let (runtime, low_effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(87, false), full_read: true, verification: false, now_ms: 10_003 }, &settings);
+        assert!(!low_effects.iter().any(|effect| matches!(effect, ReducerEffect::SetProcessClosed)));
+        assert!(runtime.account.as_ref().is_some_and(|account| account.fired_episodes.is_empty()));
+
+        let (_, crossing_effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_004 }, &settings);
+        assert!(crossing_effects.contains(&ReducerEffect::SetProcessClosed));
     }
 
     #[test]

@@ -11,7 +11,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { useQuotaGuardState } from "@/features/quota-guard/hooks/useQuotaGuardState";
-import { quotaGuardPhaseLabel } from "@/features/quota-guard/quotaGuardViewModel";
+import { quotaGuardControls, quotaGuardPhaseLabel } from "@/features/quota-guard/quotaGuardViewModel";
 import {
   addWorkspace,
   getAppSettings,
@@ -30,7 +30,7 @@ import type {
   WorkspaceInfo,
 } from "@/types";
 
-type AsyncAction = "load" | "save" | "refresh" | "workspace" | null;
+type AsyncAction = "load" | "save" | "workspace" | null;
 type Screen = "monitor" | "settings";
 type Appearance = "light" | "dark";
 type WindowMode = "compact" | "mini" | "pill";
@@ -282,28 +282,6 @@ export function UsageLimiterApp() {
     }
   }, [settings]);
 
-  const refreshUsage = useCallback(async () => {
-    if (!settings?.quotaGuard.enabled) {
-      setError("Turn on the limiter before refreshing usage.");
-      return;
-    }
-    if (workspaces.length === 0) {
-      setError("Connect a Codex workspace before refreshing usage.");
-      return;
-    }
-    setBusy("refresh");
-    setError(null);
-    setNotice(null);
-    try {
-      await quotaGuard.verifyNow();
-      setNotice("Usage refreshed from Codex.");
-    } catch (refreshError) {
-      setError(String(refreshError));
-    } finally {
-      setBusy(null);
-    }
-  }, [quotaGuard, settings?.quotaGuard.enabled, workspaces.length]);
-
   const activeWindow = useMemo(
     () => moreUsedWindow(quotaGuard.state?.snapshot?.primary, quotaGuard.state?.snapshot?.secondary),
     [quotaGuard.state?.snapshot?.primary, quotaGuard.state?.snapshot?.secondary],
@@ -326,6 +304,7 @@ export function UsageLimiterApp() {
       ? "healthy"
       : "neutral";
   const snapshotStale = Boolean(activeWindow) && quotaGuard.state?.snapshotFresh === false;
+  const quotaControls = quotaGuardControls(quotaGuard.state);
 
   const floorFromPointer = useCallback((clientX: number) => {
     const rect = barRef.current?.getBoundingClientRect();
@@ -487,7 +466,7 @@ export function UsageLimiterApp() {
   const usageValueClass = `limiter-usage__value${snapshotStale ? " is-stale" : ""}`;
   const resetText = activeWindow
     ? snapshotStale
-      ? "Stale reading — refresh for current usage"
+      ? "Stale reading — waiting for the next update"
       : formatReset(activeWindow.resetsAt)
     : "No usage reading yet";
   const shortResetText = activeWindow
@@ -569,15 +548,15 @@ export function UsageLimiterApp() {
                 <span className="limiter-last-checked">
                   {quotaGuard.state?.snapshotFresh ? "Last checked just now" : "Waiting for update"}
                 </span>
-                {workspaces.length === 0 ? (
+                {quotaControls.rearm ? (
+                  <button type="button" onClick={() => void quotaGuard.rearm()} disabled={busy !== null}>
+                    Rearm
+                  </button>
+                ) : workspaces.length === 0 ? (
                   <button type="button" onClick={() => void connectWorkspace()} disabled={busy !== null}>
                     <FolderOpen /> Connect
                   </button>
-                ) : (
-                  <button type="button" onClick={() => void refreshUsage()} disabled={busy !== null || !draft.enabled}>
-                    <RefreshCw className={busy === "refresh" ? "limiter-spin" : ""} /> Refresh
-                  </button>
-                )}
+                ) : null}
               </footer>
             </>
           ) : null}

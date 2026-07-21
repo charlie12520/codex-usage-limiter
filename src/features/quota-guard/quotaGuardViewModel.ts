@@ -32,7 +32,7 @@ export type QuotaGuardControls = {
   applyActionNow: boolean;
   keepWaiting: boolean;
   interruptNow: boolean;
-  verifyNow: boolean;
+  rearm: boolean;
   resolve: boolean;
 };
 
@@ -50,7 +50,7 @@ export function quotaGuardControls(state: QuotaGuardPublicState | null): QuotaGu
       applyActionNow: false,
       keepWaiting: false,
       interruptNow: false,
-      verifyNow: false,
+      rearm: false,
       resolve: false,
     };
   }
@@ -61,10 +61,13 @@ export function quotaGuardControls(state: QuotaGuardPublicState | null): QuotaGu
     keepWaiting: state.phase === "awaitingDrainDecision",
     interruptNow:
       state.phase === "awaitingDrainDecision" || state.phase === "draining",
-    verifyNow:
+    rearm:
       state.phase === "parked" ||
       state.phase === "verifyingReset" ||
-      (state.phase === "interventionRequired" && state.accountKey !== null),
+      state.phase === "draining" ||
+      state.phase === "awaitingDrainDecision" ||
+      state.phase === "interrupting" ||
+      state.phase === "interventionRequired",
     resolve: state.phase === "interventionRequired",
   };
 }

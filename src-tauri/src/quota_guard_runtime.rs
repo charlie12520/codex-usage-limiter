@@ -748,6 +748,9 @@ async fn handle_command(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathB
             apply_event(handle, app, path, bindings, ReducerEvent::ForceInterrupt { now_ms: now_ms() }).await?;
         }
         QuotaGuardCommand::VerifyNow => verify_once(handle, app, path, bindings, true).await?,
+        QuotaGuardCommand::Rearm => {
+            apply_event(handle, app, path, bindings, ReducerEvent::Rearm { now_ms: now_ms() }).await?;
+        }
         QuotaGuardCommand::RetryClosed => {
             handle.inner.gate.set_policy(ProcessPolicy::EnabledClosed);
             resume_external_engines(handle, path).await?;
@@ -1001,6 +1004,8 @@ pub(crate) async fn quota_guard_keep_waiting(state: State<'_, AppState>) -> Resu
 pub(crate) async fn quota_guard_interrupt_now(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::InterruptNow).await }
 #[tauri::command]
 pub(crate) async fn quota_guard_verify_now(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::VerifyNow).await }
+#[tauri::command]
+pub(crate) async fn quota_guard_rearm(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::Rearm).await }
 #[tauri::command]
 pub(crate) async fn quota_guard_resolve_intervention(resolution: String, state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> {
     match resolution.as_str() {

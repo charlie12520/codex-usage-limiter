@@ -200,6 +200,7 @@ pub fn run() {
             quota_guard_runtime::quota_guard_keep_waiting,
             quota_guard_runtime::quota_guard_interrupt_now,
             quota_guard_runtime::quota_guard_verify_now,
+            quota_guard_runtime::quota_guard_rearm,
             quota_guard_runtime::quota_guard_resolve_intervention,
             files::file_read,
             files::file_write,

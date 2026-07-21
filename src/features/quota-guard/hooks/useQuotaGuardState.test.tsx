@@ -21,8 +21,8 @@ vi.mock("@/services/tauri", () => ({
   quotaGuardApplyActionNow: vi.fn(),
   quotaGuardKeepWaiting: vi.fn(),
   quotaGuardInterruptNow: vi.fn(),
+  quotaGuardRearm: vi.fn(),
   quotaGuardResolveIntervention: vi.fn(),
-  quotaGuardVerifyNow: vi.fn(),
 }));
 vi.mock("./useQuotaGuardNotificationActions", () => ({
   useQuotaGuardNotificationActions: vi.fn(),

@@ -272,7 +272,7 @@ type BuildAppModalsPropsArgs = {
   onQuotaGuardApplyActionNow: AppModalsProps["onQuotaGuardApplyActionNow"];
   onQuotaGuardKeepWaiting: AppModalsProps["onQuotaGuardKeepWaiting"];
   onQuotaGuardInterruptNow: AppModalsProps["onQuotaGuardInterruptNow"];
-  onQuotaGuardVerifyNow: AppModalsProps["onQuotaGuardVerifyNow"];
+  onQuotaGuardRearm: AppModalsProps["onQuotaGuardRearm"];
   onQuotaGuardResolve: AppModalsProps["onQuotaGuardResolve"];
   onQuotaGuardResumeQueuedSends: () => void;
 };
@@ -329,7 +329,7 @@ function buildAppModalsProps({
   onQuotaGuardApplyActionNow,
   onQuotaGuardKeepWaiting,
   onQuotaGuardInterruptNow,
-  onQuotaGuardVerifyNow,
+  onQuotaGuardRearm,
   onQuotaGuardResolve,
   onQuotaGuardResumeQueuedSends,
 }: BuildAppModalsPropsArgs): AppModalsProps {
@@ -385,7 +385,7 @@ function buildAppModalsProps({
     onQuotaGuardApplyActionNow,
     onQuotaGuardKeepWaiting,
     onQuotaGuardInterruptNow,
-    onQuotaGuardVerifyNow,
+    onQuotaGuardRearm,
     onQuotaGuardResolve,
     onQuotaGuardResumeQueuedSends,
   };
@@ -572,7 +572,7 @@ export function useMainAppModals({
         onQuotaGuardApplyActionNow: quotaGuard.applyActionNow,
         onQuotaGuardKeepWaiting: quotaGuard.keepWaiting,
         onQuotaGuardInterruptNow: quotaGuard.interruptNow,
-        onQuotaGuardVerifyNow: quotaGuard.verifyNow,
+        onQuotaGuardRearm: quotaGuard.rearm,
         onQuotaGuardResolve: quotaGuard.resolveIntervention,
         onQuotaGuardResumeQueuedSends: resumeQuotaGuardQueue,
       }),
@@ -614,7 +614,7 @@ export function useMainAppModals({
       quotaGuard.queueResumeRequired,
       quotaGuard.resolveIntervention,
       quotaGuard.state,
-      quotaGuard.verifyNow,
+      quotaGuard.rearm,
       quotaGuardPanelOpen,
       resumeQuotaGuardQueue,
       settingsViewProps,

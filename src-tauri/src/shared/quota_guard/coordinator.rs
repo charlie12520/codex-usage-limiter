@@ -63,7 +63,7 @@ pub(crate) enum ActorEvent {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum QuotaGuardCommand { ApplyActionNow, KeepWaiting, InterruptNow, VerifyNow, RetryClosed }
+pub(crate) enum QuotaGuardCommand { ApplyActionNow, KeepWaiting, InterruptNow, VerifyNow, Rearm, RetryClosed }
 
 pub(crate) struct QuotaGuardInner {
     pub(crate) runtime: Arc<Mutex<QuotaGuardRuntimeState>>,
