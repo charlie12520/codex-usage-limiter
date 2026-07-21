@@ -120,10 +120,7 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
     let settings = app.state::<AppState>().app_settings.lock().await.clone();
     let decision = recover(settings.quota_guard.enabled, load_runtime(&path, now_ms()), now_ms());
     handle.inner.gate.set_policy(decision.policy);
-    let mut runtime = decision.state;
-    if runtime.effective_settings.is_none() {
-        runtime.effective_settings = Some(settings.quota_guard.clone());
-    }
+    let runtime = restore_runtime_for_startup(decision.state, &settings.quota_guard);
     *handle.inner.runtime.lock().await = runtime;
     if let Err(error) = persist_current(&handle, &path).await {
         handle.fail_closed(&format!("quota guard startup persistence failed: {error}")).await;
@@ -253,6 +250,20 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
     }
     handle.inner.gate.close();
 }
+
+/// The app settings file is authoritative after a completed threshold update.
+/// Keep an in-flight debounce's durable effective settings, but do not let an
+/// older completed value control the first post-restart snapshot evaluation.
+fn restore_runtime_for_startup(
+    mut runtime: crate::shared::quota_guard::model::QuotaGuardRuntimeState,
+    settings: &QuotaGuardSettings,
+) -> crate::shared::quota_guard::model::QuotaGuardRuntimeState {
+    if runtime.pending_thresholds.is_none() || runtime.effective_settings.is_none() {
+        runtime.effective_settings = Some(settings.clone());
+    }
+    runtime
+}
+
 async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, change: SettingsChanged) -> Result<(), String> {
     let (change, schedule_at) = prepare_settings_change(handle, change, now_ms()).await;
     persist_current(handle, path).await?;
@@ -1169,6 +1180,75 @@ mod tests {
             assert!(!change.updated.armed);
             assert!(handle.runtime().await.pending_thresholds.is_none());
         });
+    }
+
+    #[test]
+    fn startup_restores_snapshot_for_first_live_threshold_crossing() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.enabled = true;
+        settings.primary_threshold_percent = 47;
+        settings.action = QuotaAction::InterruptImmediately;
+        settings.external_suspend = true;
+
+        let mut persisted = QuotaGuardRuntimeState::default();
+        let mut account = AccountRuntime::new("account".into(), 10_000);
+        account.phase = QuotaGuardPhase::Ready;
+        account.snapshot = Some(RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 46,
+                window_duration_mins: Some(60),
+                resets_at: Some(2_000),
+            }),
+            secondary: None,
+            credits: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+            observed_at: 10_000,
+        });
+        persisted.account = Some(account);
+
+        // This stale value is possible after a completed debounce. It must not
+        // replace the saved app settings on the next launch.
+        let mut stale_effective_settings = settings.clone();
+        stale_effective_settings.primary_threshold_percent = 90;
+        persisted.effective_settings = Some(stale_effective_settings);
+
+        let recovered = recover(true, LoadRuntime::Valid(persisted), 10_001);
+        let runtime = restore_runtime_for_startup(recovered.state, &settings);
+        let effective_settings = runtime.effective_settings.clone().expect("startup settings");
+        assert_eq!(effective_settings.primary_threshold_percent, 47);
+        assert_eq!(
+            runtime.account.as_ref().and_then(|account| account.snapshot.as_ref())
+                .and_then(|snapshot| snapshot.primary.as_ref())
+                .map(|window| window.used_percent),
+            Some(46),
+        );
+
+        let live = RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 47,
+                window_duration_mins: Some(60),
+                resets_at: Some(2_000),
+            }),
+            secondary: None,
+            credits: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+            observed_at: 10_001,
+        };
+        let (runtime, effects) = reduce(
+            runtime,
+            ReducerEvent::Snapshot {
+                snapshot: live,
+                full_read: true,
+                verification: false,
+                now_ms: 10_001,
+            },
+            &effective_settings,
+        );
+
+        assert_eq!(runtime.account.map(|account| account.phase), Some(QuotaGuardPhase::Closing));
+        assert!(effects.contains(&ReducerEffect::SuspendExternalEngines));
     }
 
     #[test]
