@@ -432,6 +432,10 @@ select:disabled {
   opacity: 0.72;
 }
 
+.limiter-progress__handle:not(.is-disarmed) .limiter-progress__knob {
+  border-color: var(--accent);
+}
+
 .limiter-progress__knob {
   position: absolute;
   inset: 0;
@@ -452,6 +456,11 @@ select:disabled {
   height: 7px;
   border-radius: 1px;
   background: var(--border-strong);
+}
+
+.limiter-progress__handle:not(.is-disarmed) .limiter-progress__knob::before,
+.limiter-progress__handle:not(.is-disarmed) .limiter-progress__knob::after {
+  background: var(--accent);
 }
 
 .limiter-progress__handle small {

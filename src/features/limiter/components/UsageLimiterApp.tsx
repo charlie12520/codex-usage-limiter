@@ -89,6 +89,26 @@ function clampRemainingFloor(value: number) {
   return Math.min(99, Math.max(1, Math.round(Number.isFinite(value) ? Number(value) : 0)));
 }
 
+function changedQuotaGuardFields(
+  previous: QuotaGuardSettings,
+  next: QuotaGuardSettings,
+): Partial<QuotaGuardSettings> {
+  const changed: Partial<QuotaGuardSettings> = {};
+  if (next.enabled !== previous.enabled) changed.enabled = next.enabled;
+  if (next.armed !== previous.armed) changed.armed = next.armed;
+  if (next.primaryThresholdPercent !== previous.primaryThresholdPercent) {
+    changed.primaryThresholdPercent = next.primaryThresholdPercent;
+  }
+  if (next.secondaryThresholdPercent !== previous.secondaryThresholdPercent) {
+    changed.secondaryThresholdPercent = next.secondaryThresholdPercent;
+  }
+  if (next.rearmAfterResetPercentLeft !== previous.rearmAfterResetPercentLeft) {
+    changed.rearmAfterResetPercentLeft = next.rearmAfterResetPercentLeft;
+  }
+  if (next.action !== previous.action) changed.action = next.action;
+  return changed;
+}
+
 function remainingParts(timestamp: number) {
   const remainingMinutes = Math.max(0, Math.ceil((timestamp * 1000 - Date.now()) / 60_000));
   const days = Math.floor(remainingMinutes / 1440);
@@ -232,7 +252,15 @@ export function UsageLimiterApp() {
     setError(null);
     setNotice(null);
     try {
-      const updated = await updateAppSettings({ ...settings, quotaGuard: nextDraft });
+      // Settings commands carry a full object. Reload and apply only this
+      // screen's changed guard fields so a delayed UI save cannot echo an old
+      // threshold over an automatic backend rearm.
+      const current = await getAppSettings();
+      const patch = changedQuotaGuardFields(settings.quotaGuard, nextDraft);
+      const updated = await updateAppSettings({
+        ...current,
+        quotaGuard: { ...current.quotaGuard, ...patch },
+      });
       setSettings(updated);
       setDraft(updated.quotaGuard);
       return true;
@@ -278,9 +306,10 @@ export function UsageLimiterApp() {
       const nextWorkspaces = await listWorkspaces();
       setWorkspaces(nextWorkspaces);
       if (settings) {
+        const current = await getAppSettings();
         const updated = await updateAppSettings({
-          ...settings,
-          quotaGuard: { ...settings.quotaGuard, enabled: true },
+          ...current,
+          quotaGuard: { ...current.quotaGuard, enabled: true },
         });
         setSettings(updated);
         setDraft(updated.quotaGuard);

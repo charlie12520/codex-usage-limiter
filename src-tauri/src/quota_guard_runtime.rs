@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::shared::codex_core::{
     account_rate_limits_core, account_read_strict_core, read_thread_core, resume_thread_core,
@@ -29,7 +29,7 @@ use crate::shared::quota_guard::persistence::{load_runtime, persist_runtime};
 use crate::shared::quota_guard::recovery::recover;
 use crate::shared::quota_guard::reducer::{reduce, ReducerEffect, ReducerEvent};
 use crate::state::AppState;
-use crate::types::QuotaGuardSettings;
+use crate::types::{AppSettings, QuotaGuardSettings};
 
 const THRESHOLD_SETTLE_DELAY_MS: i64 = 10_000;
 const MONITOR_POLL_INTERVAL_MS: i64 = 10_000;
@@ -1146,17 +1146,14 @@ async fn run_effect(
         }
         ReducerEffect::PersistAutoRearm { threshold_percent } => {
             let state = app.state::<AppState>();
-            let mut settings = state.app_settings.lock().await.clone();
-            settings.quota_guard.primary_threshold_percent = threshold_percent;
-            settings.quota_guard.secondary_threshold_percent = threshold_percent;
-            settings.quota_guard.armed = true;
-            let saved = crate::shared::settings_core::update_app_settings_core(
-                settings,
+            persist_auto_rearm_settings(
+                handle,
                 &state.app_settings,
+                &state.settings_update_lock,
                 &state.settings_path,
+                threshold_percent,
             )
             .await?;
-            handle.inner.runtime.lock().await.effective_settings = Some(saved.quota_guard);
         }
         ReducerEffect::FinalizeClosedEpisode { transition_id } => {
             enqueue_finalization_after_admissions(handle, transition_id)?;
@@ -1530,7 +1527,7 @@ async fn healthy_revalidate(
     path: &PathBuf,
     bindings: &mut HashMap<String, (String, String)>,
 ) -> Result<(), String> {
-    let (workspace_id, expected_account_key, canonical_home) = {
+    let (workspace_id, expected_account_key) = {
         let runtime = handle.runtime().await;
         let account = runtime
             .account
@@ -1542,14 +1539,15 @@ async fn healthy_revalidate(
             .ok_or_else(|| {
                 "quota guard has no associated workspace for identity revalidation".to_string()
             })?;
-        let canonical_home = bindings
-            .get(&workspace_id)
-            .map(|(_, home)| home.clone())
-            .ok_or_else(|| {
-                "quota guard workspace binding missing for identity revalidation".to_string()
-            })?;
-        (workspace_id, account.account_key, canonical_home)
+        (workspace_id, account.account_key)
     };
+    restore_workspace_binding_for_revalidation(handle, app, bindings, &workspace_id).await?;
+    let canonical_home = bindings
+        .get(&workspace_id)
+        .map(|(_, home)| home.clone())
+        .ok_or_else(|| {
+            "quota guard workspace binding missing after revalidation recovery".to_string()
+        })?;
     let control = LocalAppServerControl { app: app.clone() };
     let identity = strict_account_identity(&control.read_identity(workspace_id.clone()).await?)
         .ok_or_else(|| "account/read returned no strict identity".to_string())?;
@@ -1568,6 +1566,78 @@ async fn healthy_revalidate(
         false,
     )
     .await
+}
+
+/// The monitor can outlive an app-server session (for example after a real
+/// quota-window reset). Recreate the binding before strict identity reads so a
+/// transient missing session heals through the normal app-server path instead
+/// of leaving the guard in intervention-required.
+async fn restore_workspace_binding_for_revalidation(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    bindings: &mut HashMap<String, (String, String)>,
+    workspace_id: &str,
+) -> Result<(), String> {
+    if bindings.contains_key(workspace_id) {
+        return Ok(());
+    }
+
+    let state = app.state::<AppState>();
+    let has_session = state.sessions.lock().await.contains_key(workspace_id);
+    if !has_session {
+        crate::workspaces::connect_workspace_local(app, &state, workspace_id.to_string()).await?;
+    }
+    let session = state
+        .sessions
+        .lock()
+        .await
+        .get(workspace_id)
+        .cloned()
+        .ok_or_else(|| {
+            "quota guard could not restore its workspace session for identity revalidation"
+                .to_string()
+        })?;
+    if !session.is_workspace_bound(workspace_id).await {
+        return Err(
+            "quota guard restored a workspace session without an active binding".to_string(),
+        );
+    }
+
+    let epoch = session.session_epoch().to_string();
+    let canonical_home = session.canonical_codex_home().to_string();
+    handle
+        .inner
+        .gate
+        .register_closed_epoch(epoch.clone(), workspace_id.to_string());
+    bindings.insert(workspace_id.to_string(), (epoch, canonical_home));
+    Ok(())
+}
+
+async fn persist_auto_rearm_settings(
+    handle: &QuotaGuardHandle,
+    app_settings: &Mutex<AppSettings>,
+    settings_update_lock: &Mutex<()>,
+    settings_path: &PathBuf,
+    threshold_percent: u8,
+) -> Result<QuotaGuardSettings, String> {
+    // Use the same transaction lock as settings UI writes. This makes the
+    // auto-rearm update the last durable threshold decision for its actor
+    // event, rather than racing a stale full-settings request.
+    let _settings_transaction = settings_update_lock.lock().await;
+    let mut settings = app_settings.lock().await.clone();
+    settings.quota_guard.primary_threshold_percent = threshold_percent;
+    settings.quota_guard.secondary_threshold_percent = threshold_percent;
+    settings.quota_guard.armed = true;
+    crate::storage::write_settings(settings_path, &settings)?;
+    *app_settings.lock().await = settings.clone();
+
+    // A pending UI threshold debounce is an older intent. Leaving it alive
+    // lets ThresholdSettled replace this rearm in effective settings after the
+    // durable write has completed.
+    let mut runtime = handle.inner.runtime.lock().await;
+    runtime.effective_settings = Some(settings.quota_guard.clone());
+    runtime.pending_thresholds = None;
+    Ok(settings.quota_guard)
 }
 
 async fn handle_command(
@@ -1915,6 +1985,76 @@ async fn mark_intervention(handle: &QuotaGuardHandle, path: &PathBuf, message: &
     drop(runtime);
     let _ = persist_current(handle, path).await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_rearm_durably_replaces_a_pending_stale_threshold_settle() {
+        tauri::async_runtime::block_on(async {
+            let temp_dir = std::env::temp_dir().join(format!(
+                "codex-monitor-auto-rearm-runtime-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&temp_dir).expect("create test directory");
+            let settings_path = temp_dir.join("settings.json");
+            let app_settings = Mutex::new(AppSettings::default());
+            {
+                let mut settings = app_settings.lock().await;
+                settings.quota_guard.armed = false;
+                settings.quota_guard.primary_threshold_percent = 57;
+                settings.quota_guard.secondary_threshold_percent = 57;
+            }
+            crate::storage::write_settings(&settings_path, &*app_settings.lock().await)
+                .expect("persist initial settings");
+
+            let handle = QuotaGuardHandle::default();
+            let settles_at = 123_456;
+            {
+                let mut runtime = handle.inner.runtime.lock().await;
+                runtime.effective_settings = Some(app_settings.lock().await.quota_guard.clone());
+                runtime.pending_thresholds = Some(PendingThresholdSettings {
+                    primary_threshold_percent: 57,
+                    secondary_threshold_percent: 57,
+                    settles_at,
+                });
+            }
+            let settings_update_lock = Mutex::new(());
+
+            persist_auto_rearm_settings(
+                &handle,
+                &app_settings,
+                &settings_update_lock,
+                &settings_path,
+                75,
+            )
+            .await
+            .expect("persist automatic rearm");
+
+            assert!(
+                take_settled_threshold_change(&handle, settles_at)
+                    .await
+                    .expect("inspect stale settle")
+                    .is_none(),
+                "the stale ThresholdSettled event must be a no-op"
+            );
+            let durable = crate::storage::read_settings(&settings_path).expect("read settings");
+            assert!(durable.quota_guard.armed);
+            assert_eq!(durable.quota_guard.primary_threshold_percent, 75);
+            assert_eq!(durable.quota_guard.secondary_threshold_percent, 75);
+            let runtime = handle.runtime().await;
+            let effective = runtime.effective_settings.expect("effective settings");
+            assert!(effective.armed);
+            assert_eq!(effective.primary_threshold_percent, 75);
+            assert_eq!(effective.secondary_threshold_percent, 75);
+            assert!(runtime.pending_thresholds.is_none());
+
+            let _ = std::fs::remove_dir_all(temp_dir);
+        });
+    }
+}
+
 async fn public_state_with_bindings(
     handle: &QuotaGuardHandle,
     bindings: &HashMap<String, (String, String)>,

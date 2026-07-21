@@ -1,7 +1,7 @@
 use super::model::{
     AccountRuntime, EpisodeKey, PendingLocalStart, QuotaAction, QuotaGuardActivityEntry,
-    QuotaGuardActivityKind, QuotaGuardPhase,
-    QuotaGuardRuntimeState, QuotaWindowKind, RateLimitSnapshot, TurnKey,
+    QuotaGuardActivityKind, QuotaGuardPhase, QuotaGuardRuntimeState, QuotaWindowKind,
+    RateLimitSnapshot, TurnKey,
 };
 use crate::types::QuotaGuardSettings;
 
@@ -196,15 +196,19 @@ fn fired(
         .find_map(|kind| {
             let current = account.snapshot.as_ref()?.window(kind)?;
             let floor = threshold(settings, kind);
-            let was_below = previous
-                .and_then(|snapshot| snapshot.window(kind))
-                .map(|window| window.used_percent < floor)
-                .unwrap_or(force);
+            let was_below = force
+                || previous
+                    .and_then(|snapshot| snapshot.window(kind))
+                    .map(|window| window.used_percent < floor)
+                    .unwrap_or(true);
             (current.used_percent >= floor && was_below).then_some((kind, floor))
         })
 }
 
-fn primary_reset_observed(previous: Option<&RateLimitSnapshot>, current: &RateLimitSnapshot) -> bool {
+fn primary_reset_observed(
+    previous: Option<&RateLimitSnapshot>,
+    current: &RateLimitSnapshot,
+) -> bool {
     let Some(previous) = previous.and_then(|snapshot| snapshot.primary.as_ref()) else {
         return false;
     };
@@ -341,7 +345,8 @@ pub(crate) fn reduce(
                             .unwrap_or_default();
                         let threshold_percent = (100 - percent_left).max(current_used);
                         account.phase = QuotaGuardPhase::Monitoring;
-                        account.fire_at_or_above_on_next_snapshot = threshold_percent == current_used;
+                        account.fire_at_or_above_on_next_snapshot =
+                            threshold_percent == current_used;
                         account.push_activity(QuotaGuardActivityEntry {
                             id: None,
                             kind: QuotaGuardActivityKind::StateChanged,
@@ -429,9 +434,13 @@ mod rearm_after_reset_tests {
     fn enabled_runtime(settings: &QuotaGuardSettings) -> QuotaGuardRuntimeState {
         reduce(
             QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable { account_key: "account".into(), now_ms: 0 },
+            ReducerEvent::Enable {
+                account_key: "account".into(),
+                now_ms: 0,
+            },
             settings,
-        ).0
+        )
+        .0
     }
 
     #[test]
@@ -440,20 +449,46 @@ mod rearm_after_reset_tests {
         settings.armed = false;
         settings.rearm_after_reset_percent_left = Some(40);
         let runtime = enabled_runtime(&settings);
-        let (mut runtime, _) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(92, Some(100)), full_read: true, verification: false, now_ms: 1,
-        }, &settings);
+        let (mut runtime, _) = reduce(
+            runtime,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(92, Some(100)),
+                full_read: true,
+                verification: false,
+                now_ms: 1,
+            },
+            &settings,
+        );
         runtime.account.as_mut().unwrap().phase = QuotaGuardPhase::Tripped;
-        let (runtime, effects) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(18, Some(200)), full_read: true, verification: false, now_ms: 2,
-        }, &settings);
+        let (runtime, effects) = reduce(
+            runtime,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(18, Some(200)),
+                full_read: true,
+                verification: false,
+                now_ms: 2,
+            },
+            &settings,
+        );
 
-        assert_eq!(runtime.account.as_ref().unwrap().phase, QuotaGuardPhase::Monitoring);
+        assert_eq!(
+            runtime.account.as_ref().unwrap().phase,
+            QuotaGuardPhase::Monitoring
+        );
         assert!(effects.contains(&ReducerEffect::ResumeExternalEngines));
         assert!(effects.contains(&ReducerEffect::SetProcessOpen));
-        assert!(effects.contains(&ReducerEffect::PersistAutoRearm { threshold_percent: 60 }));
-        assert!(runtime.account.unwrap().activity_entries.iter().any(|entry|
-            entry.message.as_deref().is_some_and(|message| message.contains("Automatically rearmed"))));
+        assert!(effects.contains(&ReducerEffect::PersistAutoRearm {
+            threshold_percent: 60
+        }));
+        assert!(runtime
+            .account
+            .unwrap()
+            .activity_entries
+            .iter()
+            .any(|entry| entry
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Automatically rearmed"))));
     }
 
     #[test]
@@ -461,37 +496,105 @@ mod rearm_after_reset_tests {
         let mut settings = QuotaGuardSettings::default();
         settings.armed = false;
         let runtime = enabled_runtime(&settings);
-        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(90, Some(100)), full_read: true, verification: false, now_ms: 1,
-        }, &settings);
-        let (runtime, effects) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(10, Some(200)), full_read: true, verification: false, now_ms: 2,
-        }, &settings);
+        let (runtime, _) = reduce(
+            runtime,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(90, Some(100)),
+                full_read: true,
+                verification: false,
+                now_ms: 1,
+            },
+            &settings,
+        );
+        let (runtime, effects) = reduce(
+            runtime,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(10, Some(200)),
+                full_read: true,
+                verification: false,
+                now_ms: 2,
+            },
+            &settings,
+        );
 
         assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Monitoring);
-        assert!(!effects.iter().any(|effect| matches!(effect, ReducerEffect::PersistAutoRearm { .. })));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, ReducerEffect::PersistAutoRearm { .. })));
     }
 
     #[test]
     fn reset_rearm_clamps_the_used_threshold_to_current_usage() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.rearm_after_reset_percent_left = Some(40);
-        let runtime = enabled_runtime(&settings);
-        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(90, Some(100)), full_read: true, verification: false, now_ms: 1,
-        }, &settings);
-        let (runtime, effects) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(75, Some(200)), full_read: true, verification: false, now_ms: 2,
-        }, &settings);
+        for action in [
+            QuotaAction::NotifyOnly,
+            QuotaAction::Interrupt,
+            QuotaAction::Block,
+        ] {
+            let mut settings = QuotaGuardSettings::default();
+            settings.action = action;
+            settings.rearm_after_reset_percent_left = Some(40);
+            let runtime = enabled_runtime(&settings);
+            let (runtime, _) = reduce(
+                runtime,
+                ReducerEvent::Snapshot {
+                    snapshot: snapshot(89, Some(100)),
+                    full_read: true,
+                    verification: false,
+                    now_ms: 1,
+                },
+                &settings,
+            );
+            let (runtime, effects) = reduce(
+                runtime,
+                ReducerEvent::Snapshot {
+                    snapshot: snapshot(75, Some(200)),
+                    full_read: true,
+                    verification: false,
+                    now_ms: 2,
+                },
+                &settings,
+            );
 
-        assert!(effects.contains(&ReducerEffect::PersistAutoRearm { threshold_percent: 75 }));
-        let mut rearmed_settings = settings;
-        rearmed_settings.armed = true;
-        rearmed_settings.primary_threshold_percent = 75;
-        rearmed_settings.secondary_threshold_percent = 75;
-        let (_, effects) = reduce(runtime, ReducerEvent::Snapshot {
-            snapshot: snapshot(75, Some(200)), full_read: true, verification: false, now_ms: 3,
-        }, &rearmed_settings);
-        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::Notify { .. })));
+            assert!(effects.contains(&ReducerEffect::PersistAutoRearm {
+                threshold_percent: 75
+            }));
+            let mut rearmed_settings = settings;
+            rearmed_settings.armed = true;
+            rearmed_settings.primary_threshold_percent = 75;
+            rearmed_settings.secondary_threshold_percent = 75;
+            assert!(runtime
+                .account
+                .as_ref()
+                .is_some_and(|account| account.fire_at_or_above_on_next_snapshot));
+            let (runtime, effects) = reduce(
+                runtime,
+                ReducerEvent::Snapshot {
+                    snapshot: snapshot(75, Some(200)),
+                    full_read: true,
+                    verification: false,
+                    now_ms: 3,
+                },
+                &rearmed_settings,
+            );
+
+            match action {
+                QuotaAction::NotifyOnly => {
+                    assert!(effects
+                        .iter()
+                        .any(|effect| matches!(effect, ReducerEffect::Notify { .. })));
+                    assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Monitoring);
+                }
+                QuotaAction::Interrupt => {
+                    assert!(effects.contains(&ReducerEffect::SetProcessClosed));
+                    assert!(effects.contains(&ReducerEffect::PersistDisarmed));
+                    assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Tripped);
+                }
+                QuotaAction::Block => {
+                    assert!(effects.contains(&ReducerEffect::SetProcessClosed));
+                    assert!(!effects.contains(&ReducerEffect::PersistDisarmed));
+                    assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Tripped);
+                }
+            }
+        }
     }
 }
