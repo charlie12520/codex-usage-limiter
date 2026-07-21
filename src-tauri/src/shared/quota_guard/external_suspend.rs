@@ -129,20 +129,39 @@ pub(crate) fn sweep(
     };
     let mut roots = own_session_pids;
     roots.insert(std::process::id());
-    let own_tree = descendants(&processes, &roots);
     let current_image = std::env::current_exe()
         .ok()
         .map(|path| path.to_string_lossy().to_string());
+    sweep_matching_processes(
+        processes,
+        &roots,
+        already_suspended,
+        current_image.as_deref(),
+        now_ms,
+        suspend_process,
+    )
+}
+
+fn sweep_matching_processes(
+    processes: Vec<ProcessInfo>,
+    own_session_pids: &HashSet<u32>,
+    already_suspended: &HashSet<(u32, u64)>,
+    current_image: Option<&str>,
+    now_ms: i64,
+    mut suspend: impl FnMut(u32) -> Result<(), String>,
+) -> SweepResult {
+    let own_tree = descendants(&processes, own_session_pids);
     let mut result = SweepResult::default();
+    // Keep the sweep idempotent even if a process source ever returns the
+    // same identity twice. NtSuspendProcess increments a per-process count.
+    let mut tracked = already_suspended.clone();
     for process in processes {
         if !is_external_codex_engine(&process.image_path) {
             continue;
         }
         if own_tree.contains(&process.pid)
             || explicitly_excluded(&process.image_path)
-            || current_image
-                .as_ref()
-                .is_some_and(|image| image.eq_ignore_ascii_case(&process.image_path))
+            || current_image.is_some_and(|image| image.eq_ignore_ascii_case(&process.image_path))
         {
             result.skipped.push(format!(
                 "skipped own/bundle engine {} ({})",
@@ -150,20 +169,27 @@ pub(crate) fn sweep(
             ));
             continue;
         }
-        if already_suspended.contains(&(process.pid, process.start_time)) {
+        let identity = (process.pid, process.start_time);
+        if !tracked.insert(identity) {
             continue;
         }
-        match suspend_process(process.pid) {
+        match suspend(process.pid) {
             Ok(()) => result.suspended.push(SuspendedExternalEngine {
                 pid: process.pid,
                 process_start_time: process.start_time,
                 image_path: process.image_path,
                 suspended_at: now_ms,
             }),
-            Err(error) => result.skipped.push(format!(
-                "skipped {} ({}): {error}",
-                process.image_path, process.pid
-            )),
+            Err(error) => {
+                // A failed attempt was not suspended, so a later sweep may
+                // retry it. Successful identities remain in `tracked` for
+                // this pass to prevent a second counted suspension.
+                tracked.remove(&identity);
+                result.skipped.push(format!(
+                    "skipped {} ({}): {error}",
+                    process.image_path, process.pid
+                ));
+            }
         }
     }
     result
@@ -182,8 +208,60 @@ pub(crate) fn resume(entries: &[SuspendedExternalEngine]) -> ResumeResult {
             }
         }
     };
+    resume_matching_entries(entries, &processes, resume_process)
+}
+
+pub(crate) fn merge_suspended_entries(
+    existing: &[SuspendedExternalEngine],
+    additions: &[SuspendedExternalEngine],
+) -> Vec<SuspendedExternalEngine> {
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+    for entry in existing.iter().chain(additions) {
+        if seen.insert((entry.pid, entry.process_start_time)) {
+            merged.push(entry.clone());
+        }
+    }
+    merged
+}
+
+pub(crate) fn remaining_after_resume(
+    tracked: &[SuspendedExternalEngine],
+    live: &[SuspendedExternalEngine],
+    resumed: &[SuspendedExternalEngine],
+) -> Vec<SuspendedExternalEngine> {
+    let live_ids = live
+        .iter()
+        .map(|entry| (entry.pid, entry.process_start_time))
+        .collect::<HashSet<_>>();
+    let resumed_ids = resumed
+        .iter()
+        .map(|entry| (entry.pid, entry.process_start_time))
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    tracked
+        .iter()
+        .filter(|entry| {
+            let identity = (entry.pid, entry.process_start_time);
+            live_ids.contains(&identity)
+                && !resumed_ids.contains(&identity)
+                && seen.insert(identity)
+        })
+        .cloned()
+        .collect()
+}
+
+fn resume_matching_entries(
+    entries: &[SuspendedExternalEngine],
+    processes: &HashMap<u32, ProcessInfo>,
+    mut resume: impl FnMut(u32) -> Result<(), String>,
+) -> ResumeResult {
     let mut result = ResumeResult::default();
+    let mut seen = HashSet::new();
     for entry in entries {
+        if !seen.insert((entry.pid, entry.process_start_time)) {
+            continue;
+        }
         let Some(process) = processes.get(&entry.pid) else {
             result.skipped.push(format!(
                 "dropped exited engine {} ({})",
@@ -198,7 +276,7 @@ pub(crate) fn resume(entries: &[SuspendedExternalEngine]) -> ResumeResult {
             ));
             continue;
         }
-        match resume_process(entry.pid) {
+        match resume(entry.pid) {
             Ok(()) => result.resumed.push(entry.clone()),
             Err(error) => result.skipped.push(format!(
                 "skipped resume {} ({}): {error}",
@@ -288,12 +366,15 @@ fn matching_entries(
 ) -> (Vec<SuspendedExternalEngine>, Vec<String>) {
     let mut live = Vec::new();
     let mut skipped = Vec::new();
+    let mut seen = HashSet::new();
     for entry in entries {
         if processes
             .get(&entry.pid)
             .is_some_and(|process| process.start_time == entry.process_start_time)
         {
-            live.push(entry.clone());
+            if seen.insert((entry.pid, entry.process_start_time)) {
+                live.push(entry.clone());
+            }
         } else {
             skipped.push(format!(
                 "dropped stale suspended engine {} ({})",
@@ -509,14 +590,81 @@ fn suspend_process(pid: u32) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn resume_process(pid: u32) -> Result<(), String> {
-    with_suspend_handle(pid, NtResumeProcess)
+    const MAX_RESUME_ATTEMPTS: usize = 32;
+    for _ in 0..MAX_RESUME_ATTEMPTS {
+        with_suspend_handle(pid, NtResumeProcess)?;
+        if !has_suspended_threads(pid)? {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "NtResumeProcess did not clear the suspend count after {MAX_RESUME_ATTEMPTS} attempts"
+    ))
+}
+
+/// Reads each thread's previous suspend count without changing it: the
+/// temporary SuspendThread is immediately balanced by ResumeThread. This is
+/// the smallest reliable public probe for the count hidden by
+/// NtResumeProcess.
+#[cfg(target_os = "windows")]
+fn has_suspended_threads(pid: u32) -> Result<bool, String> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+    };
+
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let mut entry: THREADENTRY32 = zeroed();
+        entry.dwSize = size_of::<THREADENTRY32>() as u32;
+        let mut next = Thread32First(snapshot, &mut entry);
+        let mut suspended = false;
+        let mut error = None;
+        while next != 0 {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                if thread.is_null() {
+                    error = Some(std::io::Error::last_os_error().to_string());
+                    break;
+                }
+                let previous = SuspendThread(thread);
+                if previous == u32::MAX {
+                    error = Some(std::io::Error::last_os_error().to_string());
+                    CloseHandle(thread);
+                    break;
+                }
+                if ResumeThread(thread) == u32::MAX {
+                    error = Some(std::io::Error::last_os_error().to_string());
+                    CloseHandle(thread);
+                    break;
+                }
+                CloseHandle(thread);
+                suspended |= previous > 0;
+            }
+            entry = zeroed();
+            entry.dwSize = size_of::<THREADENTRY32>() as u32;
+            next = Thread32Next(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        error.map_or(Ok(suspended), Err)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_external_codex_engine, matching_entries, ProcessInfo};
+    use super::{
+        is_external_codex_engine, matching_entries, remaining_after_resume,
+        resume_matching_entries, sweep_matching_processes, ProcessInfo,
+    };
     use crate::shared::quota_guard::model::SuspendedExternalEngine;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     #[test]
     fn matches_only_codex_engines_and_target_triples() {
         assert!(is_external_codex_engine(
@@ -551,6 +699,76 @@ mod tests {
         assert!(live.is_empty());
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("stale"));
+    }
+
+    #[test]
+    fn repeated_sweeps_do_not_suspend_an_already_tracked_identity() {
+        let process = ProcessInfo {
+            pid: 42,
+            parent_pid: 1,
+            start_time: 10,
+            image_path: "codex.exe".into(),
+        };
+        let own_pids = HashSet::new();
+        let mut suspend_calls = Vec::new();
+        let first = sweep_matching_processes(
+            vec![process.clone()],
+            &own_pids,
+            &HashSet::new(),
+            None,
+            1,
+            |pid| {
+                suspend_calls.push(pid);
+                Ok(())
+            },
+        );
+        let known = first
+            .suspended
+            .iter()
+            .map(|entry| (entry.pid, entry.process_start_time))
+            .collect();
+        let second = sweep_matching_processes(vec![process], &own_pids, &known, None, 2, |pid| {
+            suspend_calls.push(pid);
+            Ok(())
+        });
+
+        assert_eq!(suspend_calls, vec![42]);
+        assert_eq!(first.suspended.len(), 1);
+        assert!(second.suspended.is_empty());
+    }
+
+    #[test]
+    fn duplicate_tracked_identity_resumes_and_clears_once() {
+        let entry = SuspendedExternalEngine {
+            pid: 42,
+            process_start_time: 10,
+            image_path: "codex.exe".into(),
+            suspended_at: 1,
+        };
+        let processes = HashMap::from([(
+            42,
+            ProcessInfo {
+                pid: 42,
+                parent_pid: 1,
+                start_time: 10,
+                image_path: "codex.exe".into(),
+            },
+        )]);
+        let mut resume_calls = Vec::new();
+        let result = resume_matching_entries(&[entry.clone(), entry.clone()], &processes, |pid| {
+            resume_calls.push(pid);
+            Ok(())
+        });
+        let (live, stale) = matching_entries(&[entry.clone(), entry.clone()], &processes);
+
+        assert_eq!(resume_calls, vec![42]);
+        assert_eq!(result.resumed, vec![entry.clone()]);
+        assert!(
+            remaining_after_resume(&[entry.clone(), entry.clone()], &live, &result.resumed)
+                .is_empty()
+        );
+        assert_eq!(live.len(), 1, "the tracked entry has one durable identity");
+        assert!(stale.is_empty());
     }
 
     #[test]

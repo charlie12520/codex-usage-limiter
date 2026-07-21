@@ -1707,14 +1707,8 @@ async fn suspend_external_engines(
     if live != prior || !result.suspended.is_empty() {
         let mut runtime = handle.inner.runtime.lock().await;
         if let Some(account) = runtime.account.as_mut() {
-            account.suspended_external_engines = live;
-            for engine in &result.suspended {
-                if !account.suspended_external_engines.iter().any(|entry| {
-                    entry.pid == engine.pid && entry.process_start_time == engine.process_start_time
-                }) {
-                    account.suspended_external_engines.push(engine.clone());
-                }
-            }
+            account.suspended_external_engines =
+                external_suspend::merge_suspended_entries(&live, &result.suspended);
         }
         drop(runtime);
         persist_current(handle, path).await?;
@@ -1755,23 +1749,15 @@ async fn resume_external_engines(handle: &QuotaGuardHandle, path: &PathBuf) -> R
         .unwrap_or_default();
     let (live, stale) = external_suspend::live_entries(&entries);
     let result = external_suspend::resume(&live);
-    let resumed = result
-        .resumed
-        .iter()
-        .map(|entry| (entry.pid, entry.process_start_time))
-        .collect::<HashSet<_>>();
-    let live_ids = live
-        .iter()
-        .map(|entry| (entry.pid, entry.process_start_time))
-        .collect::<HashSet<_>>();
     let mut runtime = handle.inner.runtime.lock().await;
     if let Some(account) = runtime.account.as_mut() {
-        account.suspended_external_engines.retain(|entry| {
-            let identity = (entry.pid, entry.process_start_time);
-            // Stale identities and successful resumes are removed. Permission
-            // failures remain durable so a later explicit resolve/shutdown can retry.
-            live_ids.contains(&identity) && !resumed.contains(&identity)
-        });
+        // Stale identities and successful resumes are removed. Permission
+        // failures remain durable so a later explicit resolve/shutdown can retry.
+        account.suspended_external_engines = external_suspend::remaining_after_resume(
+            &account.suspended_external_engines,
+            &live,
+            &result.resumed,
+        );
     }
     drop(runtime);
     persist_current(handle, path).await?;
@@ -1855,14 +1841,8 @@ async fn reconcile_startup_external_engines(
         };
         let mut next = handle.inner.runtime.lock().await;
         if let Some(account) = next.account.as_mut() {
-            account.suspended_external_engines = live;
-            for engine in &newcomers.suspended {
-                if !account.suspended_external_engines.iter().any(|entry| {
-                    entry.pid == engine.pid && entry.process_start_time == engine.process_start_time
-                }) {
-                    account.suspended_external_engines.push(engine.clone());
-                }
-            }
+            account.suspended_external_engines =
+                external_suspend::merge_suspended_entries(&live, &newcomers.suspended);
         }
         drop(next);
         persist_current(handle, path).await?;
