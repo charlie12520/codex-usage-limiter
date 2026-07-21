@@ -2,6 +2,7 @@ import type { QuotaGuardPhase, QuotaGuardPublicState } from "./quotaGuardTypes";
 
 const PHASE_ORDER: readonly QuotaGuardPhase[] = [
   "interventionRequired",
+  "tripped",
   "interrupting",
   "parked",
   "verifyingReset",
@@ -14,6 +15,7 @@ const PHASE_ORDER: readonly QuotaGuardPhase[] = [
 const PHASE_LABELS: Record<QuotaGuardPhase, string> = {
   disabled: "Disabled",
   monitoring: "Monitoring",
+  tripped: "Frozen",
   revalidatingIdentity: "Checking account",
   interrupting: "Interrupting turns",
   parked: "Parked until reset",

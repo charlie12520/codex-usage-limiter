@@ -165,9 +165,7 @@ const baseSettings: AppSettings = {
     enabled: false,
     primaryThresholdPercent: 90,
     secondaryThresholdPercent: 90,
-    action: "interruptImmediately",
-    resetGraceMinutes: 10,
-    notifyWhenAvailable: true,
+    action: "interrupt",
   },
 };
 

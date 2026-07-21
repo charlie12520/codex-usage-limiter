@@ -3,6 +3,7 @@ import {
   quotaGuardApplyActionNow,
   quotaGuardGetState,
   quotaGuardRearm,
+  quotaGuardResume,
   quotaGuardResolveIntervention,
 } from "@/services/tauri";
 import { subscribeQuotaGuardOpenPanel, subscribeQuotaGuardStateChanged } from "@/services/events";
@@ -14,6 +15,7 @@ export type QuotaGuardController = {
   queueResumeRequired: boolean;
   applyActionNow: () => Promise<QuotaGuardPublicState>;
   rearm: () => Promise<QuotaGuardPublicState>;
+  resume?: () => Promise<QuotaGuardPublicState>;
   resolveIntervention: (resolution: QuotaGuardResolution) => Promise<QuotaGuardPublicState>;
   resumeQueuedSends: (workspaceId: string | null) => boolean;
   requireQueueResume: () => void;
@@ -67,6 +69,7 @@ export function useQuotaGuardState(onOpenPanel?: () => void) {
     () => ({
       applyActionNow: () => update(quotaGuardApplyActionNow),
       rearm: () => update(quotaGuardRearm),
+      resume: () => update(quotaGuardResume),
       resolveIntervention: (resolution: QuotaGuardResolution) =>
         update(() => quotaGuardResolveIntervention(resolution)),
       resumeQueuedSends,

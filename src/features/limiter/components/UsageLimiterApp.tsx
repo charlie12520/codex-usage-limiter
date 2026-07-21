@@ -67,10 +67,16 @@ const responseOptions: Array<{
     description: "Show an alert and keep working.",
   },
   {
-    value: "interruptImmediately",
+    value: "interrupt",
     shortLabel: "Interrupt",
-    title: "Interrupt immediately",
-    description: "Stop active turns now.",
+    title: "Interrupt",
+    description: "Freeze all Codex activity once, then switch off.",
+  },
+  {
+    value: "block",
+    shortLabel: "Block",
+    title: "Block",
+    description: "Freeze everything and block new sessions until you switch off.",
   },
 ];
 
@@ -286,6 +292,7 @@ export function UsageLimiterApp() {
     ? Math.min(draft.primaryThresholdPercent, draft.secondaryThresholdPercent)
     : 90;
   const floor = 100 - usedThreshold;
+  const constrainedFloor = useCallback((value: number) => Math.min(clampRemainingFloor(value), remaining), [remaining]);
   const barStyle = { "--progress": `${remaining}%`, "--threshold": `${floor}%` } as CSSProperties;
   const currentAction = responseOptions.find((option) => option.value === draft?.action)
     ?? responseOptions[0];
@@ -301,8 +308,8 @@ export function UsageLimiterApp() {
   const floorFromPointer = useCallback((clientX: number) => {
     const rect = barRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0) return null;
-    return clampRemainingFloor(((clientX - rect.left) / rect.width) * 100);
-  }, []);
+    return constrainedFloor(((clientX - rect.left) / rect.width) * 100);
+  }, [constrainedFloor]);
 
   const persistFloor = useCallback((remainingFloor: number) => {
     if (!settings) return;
@@ -344,8 +351,15 @@ export function UsageLimiterApp() {
     if (delta === 0) return;
     event.preventDefault();
     if (busy === "save") return;
-    persistFloor(clampRemainingFloor(floor + delta));
-  }, [busy, persistFloor, floor]);
+    persistFloor(constrainedFloor(floor + delta));
+  }, [busy, persistFloor, floor, constrainedFloor]);
+
+  useEffect(() => {
+    if (draft?.armed !== false || used <= usedThreshold) return;
+    const nextFloor = 100 - used;
+    setDraftFloor(nextFloor);
+    persistPatch({ primaryThresholdPercent: used, secondaryThresholdPercent: used });
+  }, [draft?.armed, persistPatch, setDraftFloor, used, usedThreshold]);
 
   useEffect(() => {
     const tooltip = activeWindow
@@ -403,6 +417,7 @@ export function UsageLimiterApp() {
   };
 
   const armed = draft.armed !== false;
+  const canResumeFrozenEngines = !armed && quotaGuard.state?.phase === "tripped" && (quotaGuard.state.suspendedExternalEngines?.length ?? 0) > 0;
 
   const armedSwitch = (
     <label
@@ -600,6 +615,7 @@ export function UsageLimiterApp() {
               <button type="button" onClick={() => { setError(null); setNotice(null); }} aria-label="Dismiss message"><X /></button>
             </div>
           ) : null}
+          {canResumeFrozenEngines ? <button type="button" className="limiter-button limiter-button--primary" onClick={() => void quotaGuard.resume?.()?.catch((resumeError) => setError(String(resumeError)))}>Resume</button> : null}
         </div>
       ) : (
         <div className="limiter-page limiter-settings-page">
@@ -609,11 +625,11 @@ export function UsageLimiterApp() {
                 <input
                   type="number"
                   min={1}
-                  max={99}
+                  max={remaining}
                   disabled={busy === "save"}
                   value={floor}
                   aria-label="Trigger percentage"
-                  onChange={(event) => setDraftFloor(Number(event.target.value))}
+                  onChange={(event) => setDraftFloor(constrainedFloor(Number(event.target.value)))}
                 />
                 <span>% left</span>
               </label>
@@ -621,11 +637,11 @@ export function UsageLimiterApp() {
                 className="limiter-threshold-range"
                 type="range"
                 min={1}
-                max={99}
+                max={remaining}
                 disabled={busy === "save"}
                 value={floor}
                 style={{ "--range-progress": `${floor}%` } as CSSProperties}
-                onChange={(event) => setDraftFloor(Number(event.target.value))}
+                onChange={(event) => setDraftFloor(constrainedFloor(Number(event.target.value)))}
               />
             </section>
 
@@ -646,6 +662,7 @@ export function UsageLimiterApp() {
                 ))}
               </div>
               <p>{currentAction.description}</p>
+              <p className="limiter-settings-disclaimer">Interrupt and Block freeze every Codex app instantly, but a reply already generating on the server still finishes and counts toward usage.</p>
             </section>
 
             <section className="limiter-settings-row limiter-settings-row--window">

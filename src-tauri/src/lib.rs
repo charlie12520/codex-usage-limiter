@@ -203,6 +203,7 @@ pub fn run() {
             quota_guard_runtime::quota_guard_apply_action_now,
             quota_guard_runtime::quota_guard_verify_now,
             quota_guard_runtime::quota_guard_rearm,
+            quota_guard_runtime::quota_guard_resume,
             quota_guard_runtime::quota_guard_resolve_intervention,
             files::file_read,
             files::file_write,

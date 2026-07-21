@@ -59,10 +59,8 @@ const appSettings = {
     primaryThresholdPercent: 90,
     secondaryThresholdPercent: 90,
     action: "notifyOnly",
-    resetGraceMinutes: 10,
-    notifyWhenAvailable: true,
   },
-} as AppSettings;
+} as unknown as AppSettings;
 
 const workspace = {
   id: "workspace-1",
@@ -115,6 +113,7 @@ beforeEach(() => {
     queueResumeRequired: false,
     applyActionNow: vi.fn(),
     rearm: vi.fn(),
+    resume: vi.fn(),
     resolveIntervention: vi.fn(),
     resumeQueuedSends: vi.fn(),
     requireQueueResume: vi.fn(),
@@ -202,7 +201,7 @@ describe("UsageLimiterApp", () => {
 
     await waitFor(() => expect(updateAppSettings).toHaveBeenCalledOnce());
     const updated = vi.mocked(updateAppSettings).mock.calls[0]?.[0].quotaGuard;
-    expect(updated.action).toBe("interruptImmediately");
+    expect(updated.action).toBe("interrupt");
     expect(updated.primaryThresholdPercent).toBe(75);
     expect(updated.secondaryThresholdPercent).toBe(75);
     await waitFor(() => expect(document.documentElement.dataset.appearance).toBe("dark"));
@@ -228,7 +227,7 @@ describe("UsageLimiterApp", () => {
 
     resolveUpdate({
       ...appSettings,
-      quotaGuard: { ...appSettings.quotaGuard, action: "interruptImmediately" },
+      quotaGuard: { ...appSettings.quotaGuard, action: "interrupt" },
     });
     await waitFor(() => expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy());
   });
@@ -269,6 +268,7 @@ describe("UsageLimiterApp", () => {
       queueResumeRequired: false,
       applyActionNow: vi.fn(),
       rearm: vi.fn(),
+      resume: vi.fn(),
       resolveIntervention: vi.fn(),
       resumeQueuedSends: vi.fn(),
       requireQueueResume: vi.fn(),

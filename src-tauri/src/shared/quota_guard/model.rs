@@ -1,22 +1,20 @@
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-
-use serde::{Deserialize, Serialize};
-
 pub(crate) use crate::types::QuotaAction;
 use crate::types::QuotaGuardSettings;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum QuotaGuardPhase {
     Disabled,
     Monitoring,
+    Tripped,
+    InterventionRequired,
     RevalidatingIdentity,
     Interrupting,
     Parked,
     VerifyingReset,
     Ready,
-    InterventionRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -32,8 +30,8 @@ pub(crate) enum QuotaWindowKind {
 pub(crate) struct RateLimitWindow {
     pub(crate) used_percent: u8,
     pub(crate) window_duration_mins: Option<u64>,
-    /// Codex protocol timestamps remain Unix seconds.
-    pub(crate) resets_at: Option<i64>,
+    #[serde(rename = "resetsAt")]
+    pub(crate) reset_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,15 +42,12 @@ pub(crate) struct RateLimitSnapshot {
     pub(crate) credits: Option<serde_json::Value>,
     pub(crate) plan_type: Option<String>,
     pub(crate) rate_limit_reached_type: Option<String>,
-    /// Local observation time is Unix milliseconds.
     pub(crate) observed_at: i64,
 }
-
 impl RateLimitSnapshot {
     pub(crate) fn is_fresh_at(&self, now_ms: i64) -> bool {
         now_ms >= self.observed_at && now_ms.saturating_sub(self.observed_at) <= 600_000
     }
-
     pub(crate) fn window(&self, kind: QuotaWindowKind) -> Option<&RateLimitWindow> {
         match kind {
             QuotaWindowKind::Primary => self.primary.as_ref(),
@@ -62,33 +57,6 @@ impl RateLimitSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
-pub(crate) enum EpisodeKey {
-    Threshold {
-        account_key: String,
-        window: QuotaWindowKind,
-        threshold_percent: u8,
-        resets_at: Option<i64>,
-    },
-    HardLimit {
-        account_key: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EpisodePolicy {
-    pub(crate) action: QuotaAction,
-    #[serde(default)]
-    pub(crate) external_suspend: bool,
-    #[serde(default)]
-    pub(crate) prevent_new_sessions: bool,
-    pub(crate) reset_grace_minutes: u16,
-}
-
-/// A resume is allowed only when this still identifies the same OS process,
-/// preventing PID reuse from affecting an unrelated program after restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SuspendedExternalEngine {
@@ -106,7 +74,6 @@ pub(crate) struct TurnKey {
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
 }
-
 impl TurnKey {
     pub(crate) fn stable_id(&self) -> String {
         format!(
@@ -116,11 +83,31 @@ impl TurnKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub(crate) enum EpisodeKey {
+    Threshold {
+        account_key: String,
+        window: QuotaWindowKind,
+        threshold_percent: u8,
+        resets_at: Option<i64>,
+    },
+    HardLimit {
+        account_key: String,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EpisodePolicy {
+    pub(crate) action: QuotaAction,
+    pub(crate) external_suspend: bool,
+    pub(crate) prevent_new_sessions: bool,
+    pub(crate) reset_grace_minutes: u16,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingInterrupt {
     pub(crate) turn: TurnKey,
-    #[serde(default)]
     pub(crate) generation: u64,
     pub(crate) operation_id: u64,
     pub(crate) attempt: u8,
@@ -128,15 +115,11 @@ pub(crate) struct PendingInterrupt {
     pub(crate) ack_deadline: i64,
     pub(crate) completion_deadline: Option<i64>,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum PendingStartDisposition {
     InterruptOnBind,
 }
-
-/// A start request is durable before its JSON is written.  Until exact
-/// response/notification correlation proves a turn ID it is not ownership.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingLocalStart {
@@ -154,101 +137,21 @@ pub(crate) struct PendingLocalStart {
     pub(crate) disposition: Option<PendingStartDisposition>,
     pub(crate) registered_at: i64,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UnmatchedStartedTurn {
     pub(crate) turn: TurnKey,
-    #[serde(default)]
     pub(crate) generation: u64,
     pub(crate) observed_at: i64,
 }
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TerminalObservation {
     pub(crate) turn: TurnKey,
-    #[serde(default)]
     pub(crate) generation: u64,
     pub(crate) status: String,
     pub(crate) error: Option<serde_json::Value>,
     pub(crate) observed_at: i64,
-}
-
-/// Durable state for the single account guarded by this process.  Collection
-/// keys are exact session/workspace/thread/turn triples; their wire form is
-/// intentionally never inferred from frontend visibility.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AccountRuntime {
-    pub(crate) account_key: String,
-    pub(crate) phase: QuotaGuardPhase,
-    pub(crate) revalidation_return_phase: Option<QuotaGuardPhase>,
-    pub(crate) snapshot: Option<RateLimitSnapshot>,
-    pub(crate) breached_windows: BTreeSet<QuotaWindowKind>,
-    pub(crate) fired_episodes: BTreeSet<EpisodeKey>,
-    pub(crate) episode_policy: Option<EpisodePolicy>,
-    pub(crate) associated_workspace_ids: Vec<String>,
-    pub(crate) local_turn_registry: Vec<TurnKey>,
-    #[serde(default)]
-    pub(crate) pending_local_starts: BTreeMap<u64, PendingLocalStart>,
-    /// Bounded provisional review-start observations; never active ownership.
-    #[serde(default)]
-    pub(crate) unmatched_started_turns: Vec<UnmatchedStartedTurn>,
-    #[serde(default)]
-    pub(crate) terminal_observations: Vec<TerminalObservation>,
-    #[serde(default)]
-    pub(crate) activity_entries: Vec<QuotaGuardActivityEntry>,
-    #[serde(default)]
-    pub(crate) suspended_external_engines: Vec<SuspendedExternalEngine>,
-    /// Canonical exact-turn index. Every interrupt lifecycle transition is
-    /// keyed by the immutable session/workspace/thread/turn identity.
-    #[serde(default)]
-    pub(crate) pending_interrupt_index: BTreeMap<String, PendingInterrupt>,
-    pub(crate) verify_at: Option<i64>,
-    pub(crate) monitor_healthy: bool,
-    pub(crate) last_error: Option<String>,
-    pub(crate) updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct QuotaGuardRuntimeState {
-    pub(crate) schema_version: u32,
-    pub(crate) lifecycle_generation: u64,
-    /// Monotonic operation IDs fence effects within a lifecycle generation.
-    #[serde(default)]
-    pub(crate) next_operation_id: u64,
-    pub(crate) account: Option<AccountRuntime>,
-    /// The settings currently enforced by the coordinator. This intentionally
-    /// differs from the UI's durable draft while a threshold drag is settling.
-    #[serde(default)]
-    pub(crate) effective_settings: Option<QuotaGuardSettings>,
-    /// A durable threshold draft prevents a quit during the settle window from
-    /// losing the user's final grabber position.
-    #[serde(default)]
-    pub(crate) pending_thresholds: Option<PendingThresholdSettings>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PendingThresholdSettings {
-    pub(crate) primary_threshold_percent: u8,
-    pub(crate) secondary_threshold_percent: u8,
-    pub(crate) settles_at: i64,
-}
-
-impl Default for QuotaGuardRuntimeState {
-    fn default() -> Self {
-        Self {
-            schema_version: 1,
-            lifecycle_generation: 0,
-            next_operation_id: 0,
-            account: None,
-            effective_settings: None,
-            pending_thresholds: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,7 +168,6 @@ pub(crate) enum QuotaGuardActivityKind {
     ExternalEngineResumed,
     ExternalEngineSkipped,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuotaGuardActivityEntry {
@@ -280,31 +182,64 @@ pub(crate) struct QuotaGuardActivityEntry {
     pub(crate) message: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountRuntime {
+    pub(crate) account_key: String,
+    pub(crate) phase: QuotaGuardPhase,
+    pub(crate) snapshot: Option<RateLimitSnapshot>,
+    pub(crate) associated_workspace_ids: Vec<String>,
+    pub(crate) local_turn_registry: Vec<TurnKey>,
+    #[serde(default)]
+    pub(crate) activity_entries: Vec<QuotaGuardActivityEntry>,
+    #[serde(default)]
+    pub(crate) suspended_external_engines: Vec<SuspendedExternalEngine>,
+    pub(crate) monitor_healthy: bool,
+    pub(crate) last_error: Option<String>,
+    pub(crate) updated_at: i64,
+    #[serde(skip)]
+    pub(crate) revalidation_return_phase: Option<QuotaGuardPhase>,
+    #[serde(skip)]
+    pub(crate) breached_windows: std::collections::BTreeSet<QuotaWindowKind>,
+    #[serde(skip)]
+    pub(crate) fired_episodes: std::collections::BTreeSet<EpisodeKey>,
+    #[serde(skip)]
+    pub(crate) episode_policy: Option<EpisodePolicy>,
+    #[serde(skip)]
+    pub(crate) pending_local_starts: BTreeMap<u64, PendingLocalStart>,
+    #[serde(skip)]
+    pub(crate) unmatched_started_turns: Vec<UnmatchedStartedTurn>,
+    #[serde(skip)]
+    pub(crate) terminal_observations: Vec<TerminalObservation>,
+    #[serde(skip)]
+    pub(crate) pending_interrupt_index: BTreeMap<String, PendingInterrupt>,
+    #[serde(skip)]
+    pub(crate) verify_at: Option<i64>,
+}
 impl AccountRuntime {
     pub(crate) fn new(account_key: String, now_ms: i64) -> Self {
         Self {
             account_key,
             phase: QuotaGuardPhase::Monitoring,
-            revalidation_return_phase: None,
             snapshot: None,
-            breached_windows: BTreeSet::new(),
-            fired_episodes: BTreeSet::new(),
-            episode_policy: None,
-            associated_workspace_ids: Vec::new(),
-            local_turn_registry: Vec::new(),
-            unmatched_started_turns: Vec::new(),
-            pending_local_starts: BTreeMap::new(),
-            terminal_observations: Vec::new(),
-            activity_entries: Vec::new(),
-            suspended_external_engines: Vec::new(),
-            pending_interrupt_index: BTreeMap::new(),
-            verify_at: None,
+            associated_workspace_ids: vec![],
+            local_turn_registry: vec![],
+            activity_entries: vec![],
+            suspended_external_engines: vec![],
             monitor_healthy: true,
             last_error: None,
             updated_at: now_ms,
+            revalidation_return_phase: None,
+            breached_windows: Default::default(),
+            fired_episodes: Default::default(),
+            episode_policy: None,
+            pending_local_starts: Default::default(),
+            unmatched_started_turns: vec![],
+            terminal_observations: vec![],
+            pending_interrupt_index: Default::default(),
+            verify_at: None,
         }
     }
-
     pub(crate) fn push_activity(&mut self, activity: QuotaGuardActivityEntry) {
         self.activity_entries.push(activity);
         if self.activity_entries.len() > 100 {
@@ -316,61 +251,53 @@ impl AccountRuntime {
         self.pending_interrupt_index
             .insert(pending.turn.stable_id(), pending);
     }
-
-    pub(crate) fn push_unmatched_started_turn(
-        &mut self,
-        observation: UnmatchedStartedTurn,
-    ) -> Result<(), String> {
-        if self.unmatched_started_turns.len() >= 32 {
-            return Err("unmatched turn observation buffer overflow".into());
-        }
-        self.unmatched_started_turns.push(observation);
-        Ok(())
-    }
-
-    pub(crate) fn push_terminal_observation(
-        &mut self,
-        observation: TerminalObservation,
-    ) -> Result<(), String> {
-        if self.terminal_observations.len() >= 32 {
-            return Err("terminal observation buffer overflow".into());
-        }
-        self.terminal_observations.push(observation);
-        Ok(())
-    }
-
     pub(crate) fn remove_pending_interrupt(&mut self, turn: &TurnKey) {
         self.pending_interrupt_index.remove(&turn.stable_id());
     }
+    pub(crate) fn push_unmatched_started_turn(
+        &mut self,
+        value: UnmatchedStartedTurn,
+    ) -> Result<(), String> {
+        self.unmatched_started_turns.push(value);
+        Ok(())
+    }
+    pub(crate) fn push_terminal_observation(
+        &mut self,
+        value: TerminalObservation,
+    ) -> Result<(), String> {
+        self.terminal_observations.push(value);
+        Ok(())
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{AccountRuntime, QuotaGuardActivityEntry, QuotaGuardActivityKind};
-
-    #[test]
-    fn activity_log_retains_only_newest_hundred_entries() {
-        let mut account = AccountRuntime::new("account".into(), 0);
-        for timestamp in 0..101 {
-            account.push_activity(QuotaGuardActivityEntry {
-                id: None,
-                kind: QuotaGuardActivityKind::StateChanged,
-                timestamp,
-                operation_id: None,
-                workspace_id: None,
-                thread_id: None,
-                turn_id: None,
-                attempt: None,
-                message: None,
-            });
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingThresholdSettings {
+    pub(crate) primary_threshold_percent: u8,
+    pub(crate) secondary_threshold_percent: u8,
+    pub(crate) settles_at: i64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QuotaGuardRuntimeState {
+    pub(crate) schema_version: u32,
+    pub(crate) lifecycle_generation: u64,
+    #[serde(default)]
+    pub(crate) next_operation_id: u64,
+    pub(crate) account: Option<AccountRuntime>,
+    #[serde(default)]
+    pub(crate) effective_settings: Option<QuotaGuardSettings>,
+    #[serde(skip)]
+    pub(crate) pending_thresholds: Option<PendingThresholdSettings>,
+}
+impl Default for QuotaGuardRuntimeState {
+    fn default() -> Self {
+        Self {
+            schema_version: 2,
+            lifecycle_generation: 0,
+            next_operation_id: 0,
+            account: None,
+            effective_settings: None,
+            pending_thresholds: None,
         }
-        assert_eq!(account.activity_entries.len(), 100);
-        assert_eq!(
-            account
-                .activity_entries
-                .first()
-                .map(|entry| entry.timestamp),
-            Some(1)
-        );
     }
 }

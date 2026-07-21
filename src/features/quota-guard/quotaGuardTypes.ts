@@ -3,6 +3,7 @@ import type { RateLimitSnapshot } from "@/types";
 export type QuotaGuardPhase =
   | "disabled"
   | "monitoring"
+  | "tripped"
   | "revalidatingIdentity"
   | "interrupting"
   | "parked"

@@ -32,11 +32,7 @@ const DEFAULT_QUOTA_GUARD_SETTINGS: AppSettings["quotaGuard"] = {
   enabled: false,
   primaryThresholdPercent: 90,
   secondaryThresholdPercent: 90,
-  action: "interruptImmediately",
-  resetGraceMinutes: 10,
-  notifyWhenAvailable: true,
-  externalSuspend: false,
-  preventNewSessions: false,
+  action: "interrupt",
 };
 
 function normalizeInteger(
@@ -54,9 +50,9 @@ function normalizeInteger(
 }
 
 function normalizeQuotaGuardSettings(value: unknown): AppSettings["quotaGuard"] {
-  const settings =
+  const settings: Partial<AppSettings["quotaGuard"]> & { action?: string; preventNewSessions?: boolean } =
     value && typeof value === "object"
-      ? (value as Partial<AppSettings["quotaGuard"]>)
+      ? (value as Partial<AppSettings["quotaGuard"]> & { action?: string; preventNewSessions?: boolean })
       : {};
   return {
     enabled: settings.enabled === true,
@@ -72,16 +68,11 @@ function normalizeQuotaGuardSettings(value: unknown): AppSettings["quotaGuard"] 
       0,
       100,
     ),
-    action: settings.action === "notifyOnly" ? "notifyOnly" : "interruptImmediately",
-    resetGraceMinutes: normalizeInteger(
-      settings.resetGraceMinutes,
-      DEFAULT_QUOTA_GUARD_SETTINGS.resetGraceMinutes,
-      0,
-      1440,
-    ),
-    notifyWhenAvailable: settings.notifyWhenAvailable !== false,
-    externalSuspend: settings.externalSuspend === true,
-    preventNewSessions: settings.preventNewSessions === true,
+    action: (settings.action as string | undefined) === "notifyOnly"
+      ? "notifyOnly"
+      : (settings.action as string | undefined) === "block" || ((settings.action as string | undefined) === "interruptImmediately" && settings.preventNewSessions === true)
+        ? "block"
+        : "interrupt",
   };
 }
 

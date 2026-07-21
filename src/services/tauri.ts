@@ -905,6 +905,10 @@ export async function quotaGuardRearm(): Promise<QuotaGuardPublicState> {
   return invoke<QuotaGuardPublicState>("quota_guard_rearm");
 }
 
+export async function quotaGuardResume(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_resume");
+}
+
 export async function quotaGuardResolveIntervention(
   resolution: QuotaGuardResolution,
 ): Promise<QuotaGuardPublicState> {

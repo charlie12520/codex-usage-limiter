@@ -142,6 +142,7 @@ pub(crate) enum QuotaGuardCommand {
     VerifyNow,
     Rearm,
     RetryClosed,
+    Resume,
 }
 
 pub(crate) struct QuotaGuardInner {

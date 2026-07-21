@@ -39,11 +39,7 @@ describe("useAppSettings", () => {
       enabled: false,
       primaryThresholdPercent: 90,
       secondaryThresholdPercent: 90,
-      action: "interruptImmediately",
-      resetGraceMinutes: 10,
-      notifyWhenAvailable: true,
-      externalSuspend: false,
-      preventNewSessions: false,
+      action: "interrupt",
     });
     expect(
       normalizeAppSettings({ ...defaults, quotaGuard: undefined as never }).quotaGuard,
@@ -57,7 +53,7 @@ describe("useAppSettings", () => {
         ...defaults,
         quotaGuard: { ...defaults.quotaGuard, action },
       } as unknown as AppSettings);
-      expect(normalized.quotaGuard.action).toBe("interruptImmediately");
+      expect(normalized.quotaGuard.action).toBe("interrupt");
     }
   });
 

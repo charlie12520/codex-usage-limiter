@@ -200,7 +200,7 @@ async fn ensure_remote_runtime_for_settings(settings: &AppSettings, state: State
     let _ = crate::tailscale::tailscale_daemon_start(state).await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;

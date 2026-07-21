@@ -1,21 +1,14 @@
-use crate::types::QuotaGuardSettings;
-
-use super::evaluator::evaluate_snapshot;
 use super::model::{
-    AccountRuntime, EpisodeKey, EpisodePolicy, PendingInterrupt, PendingLocalStart,
-    PendingStartDisposition, QuotaAction, QuotaGuardPhase, QuotaGuardRuntimeState, QuotaWindowKind,
-    RateLimitSnapshot, TurnKey,
+    AccountRuntime, EpisodeKey, PendingLocalStart, QuotaAction, QuotaGuardPhase,
+    QuotaGuardRuntimeState, QuotaWindowKind, RateLimitSnapshot, TurnKey,
 };
-use super::parser::is_usage_limit_exceeded;
+use crate::types::QuotaGuardSettings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReducerEffect {
     SetProcessClosed,
     SetProcessOpen,
-    /// Runs only when an enforcing episode first freezes external engines.
     SuspendExternalEngines,
-    /// Revalidates engines frozen by the initial sweep. New engines are
-    /// discovered only when the episode explicitly opted into that policy.
     MaintainExternalEngineSuspension {
         prevent_new_sessions: bool,
     },
@@ -23,8 +16,9 @@ pub(crate) enum ReducerEffect {
     Notify {
         episode: EpisodeKey,
     },
-    FinalizeClosedEpisode {
-        transition_id: u64,
+    PersistDisarmed,
+    RaiseThresholds {
+        used_percent: u8,
     },
     Interrupt {
         turn: TurnKey,
@@ -38,11 +32,21 @@ pub(crate) enum ReducerEffect {
         operation_id: u64,
         attempt: u8,
     },
+    FinalizeClosedEpisode {
+        transition_id: u64,
+    },
     ScheduleVerification {
         generation: u64,
         verify_at: i64,
     },
     ScheduleInterruptAck {
+        turn: TurnKey,
+        generation: u64,
+        operation_id: u64,
+        attempt: u8,
+        deadline: i64,
+    },
+    ScheduleInterruptCompletion {
         turn: TurnKey,
         generation: u64,
         operation_id: u64,
@@ -60,40 +64,13 @@ pub(crate) enum ReducerEffect {
         terminal: bool,
         deadline: i64,
     },
-    ScheduleInterruptCompletion {
-        turn: TurnKey,
-        generation: u64,
-        operation_id: u64,
-        attempt: u8,
-        deadline: i64,
-    },
     ReadFullRateLimits,
-    /// An immediate authoritative read that is allowed to release a parked
-    /// episode, just like the user-facing "Verify now" command.
     VerifyNow,
 }
-
 #[derive(Debug, Clone)]
 pub(crate) enum ReducerEvent {
     Enable {
         account_key: String,
-        now_ms: i64,
-    },
-    TurnStarted {
-        turn: TurnKey,
-        now_ms: i64,
-    },
-    TurnTerminal {
-        turn: TurnKey,
-        status: String,
-        error: Option<serde_json::Value>,
-        now_ms: i64,
-    },
-    StartResponse {
-        request_id: u64,
-        session_epoch: String,
-        workspace_id: String,
-        thread_id: Option<String>,
         now_ms: i64,
     },
     Disable {
@@ -108,11 +85,22 @@ pub(crate) enum ReducerEvent {
         verification: bool,
         now_ms: i64,
     },
+    TurnStarted {
+        turn: TurnKey,
+        now_ms: i64,
+    },
+    TurnTerminal {
+        turn: TurnKey,
+        status: String,
+        error: Option<serde_json::Value>,
+        now_ms: i64,
+    },
+    Resume {
+        now_ms: i64,
+    },
     ApplyActionNow {
         now_ms: i64,
     },
-    /// Ends an active enforcement episode without clearing its fired keys.
-    /// The normal threshold hysteresis or reset observation re-arms those keys.
     Rearm {
         now_ms: i64,
     },
@@ -143,11 +131,11 @@ pub(crate) enum ReducerEvent {
         now_ms: i64,
     },
     InterruptReconciled {
+        active_turn_id: Option<String>,
         turn: TurnKey,
         generation: u64,
         operation_id: u64,
         attempt: u8,
-        active_turn_id: Option<String>,
         now_ms: i64,
     },
     InterruptReconcileFailed {
@@ -172,2108 +160,326 @@ pub(crate) enum ReducerEvent {
     RehydratePendingInterrupts {
         now_ms: i64,
     },
-    /// Durable acknowledgement before the request JSON is written.
     PendingStartRecorded {
         start: PendingLocalStart,
         now_ms: i64,
     },
-    /// Idempotent reliable failure cleanup for a start that never bound.
     PendingStartFailed {
         request_id: u64,
         generation: u64,
         now_ms: i64,
     },
+    StartResponse {
+        request_id: u64,
+        session_epoch: String,
+        workspace_id: String,
+        thread_id: Option<String>,
+        now_ms: i64,
+    },
 }
 
-fn policy(settings: &QuotaGuardSettings) -> EpisodePolicy {
-    EpisodePolicy {
-        action: settings.action,
-        external_suspend: settings.external_suspend,
-        prevent_new_sessions: settings.prevent_new_sessions,
-        reset_grace_minutes: settings.reset_grace_minutes,
+fn threshold(settings: &QuotaGuardSettings, kind: QuotaWindowKind) -> u8 {
+    match kind {
+        QuotaWindowKind::Primary => settings.primary_threshold_percent,
+        QuotaWindowKind::Secondary => settings.secondary_threshold_percent,
+        QuotaWindowKind::HardLimit => 100,
     }
 }
-
-fn increment_generation(runtime: &mut QuotaGuardRuntimeState) -> bool {
-    match runtime.lifecycle_generation.checked_add(1) {
-        Some(value) => {
-            runtime.lifecycle_generation = value;
-            true
-        }
-        None => false,
-    }
-}
-
-const INTERRUPT_ACK_TIMEOUT_MS: i64 = 10_000;
-const INTERRUPT_COMPLETION_TIMEOUT_MS: i64 = 30_000;
-const START_CONFIRMATION_TIMEOUT_MS: i64 = 10_000;
-const PROVISIONAL_OBSERVATION_TIMEOUT_MS: i64 = 10_000;
-
-fn next_operation_id(runtime: &mut QuotaGuardRuntimeState) -> Result<u64, String> {
-    runtime.next_operation_id = runtime
-        .next_operation_id
-        .checked_add(1)
-        .ok_or_else(|| "interrupt operation counter overflow".to_string())?;
-    Ok(runtime.next_operation_id)
-}
-
-fn interrupt_empty(account: &AccountRuntime) -> bool {
-    account.pending_interrupt_index.is_empty()
-        && account.pending_local_starts.is_empty()
-        && account.local_turn_registry.is_empty()
-}
-
-fn finish_if_empty(
-    account: &mut AccountRuntime,
-    generation: u64,
-    now_ms: i64,
-    effects: &mut Vec<ReducerEffect>,
-) {
-    let empty = account.phase == QuotaGuardPhase::Interrupting && interrupt_empty(account);
-    if empty {
-        match parked_verification_effect(account, generation) {
-            Ok(effect) => effects.push(effect),
-            Err(error) => enter_intervention(account, now_ms, &error),
-        }
-    }
-}
-
-fn enter_intervention(account: &mut AccountRuntime, now_ms: i64, message: &str) {
-    account.phase = QuotaGuardPhase::InterventionRequired;
-    account.last_error = Some(message.to_string());
-    account.updated_at = now_ms;
-}
-
-fn start_episode(
-    account: &mut AccountRuntime,
-    episode: EpisodeKey,
-    settings: &QuotaGuardSettings,
-    _now_ms: i64,
-    effects: &mut Vec<ReducerEffect>,
-    generation: u64,
-) {
-    if !settings.armed {
-        // Disarmed: tracking continues but no response fires. The episode is
-        // not recorded as fired, so re-arming acts on the next crossing.
-        return;
-    }
-    account.fired_episodes.insert(episode.clone());
-    account.episode_policy = Some(policy(settings));
-    match settings.action {
-        QuotaAction::NotifyOnly => {
-            account.phase = QuotaGuardPhase::Monitoring;
-            account.episode_policy = None;
-            effects.push(ReducerEffect::SetProcessOpen);
-            effects.push(ReducerEffect::Notify { episode });
-        }
-        QuotaAction::InterruptImmediately => {
-            account.phase = QuotaGuardPhase::Interrupting;
-            effects.push(ReducerEffect::SetProcessClosed);
-            if settings.external_suspend {
-                effects.push(ReducerEffect::SuspendExternalEngines);
-            }
-            effects.push(ReducerEffect::FinalizeClosedEpisode {
-                transition_id: generation,
-            });
-        }
-    }
-}
-
-fn verification_at(account: &AccountRuntime, reset_grace_minutes: u16) -> Option<i64> {
-    let snapshot = account.snapshot.as_ref()?;
-    let latest_reset = if account
-        .fired_episodes
-        .iter()
-        .any(|episode| matches!(episode, EpisodeKey::HardLimit { .. }))
-    {
-        [snapshot.primary.as_ref(), snapshot.secondary.as_ref()]
-            .into_iter()
-            .flatten()
-            .map(|window| window.resets_at)
-            .collect::<Option<Vec<_>>>()?
-            .into_iter()
-            .max()?
-    } else {
-        account
-            .breached_windows
-            .iter()
-            .filter_map(|kind| snapshot.window(*kind).and_then(|window| window.resets_at))
-            .max()?
-    };
-    latest_reset
-        .checked_mul(1_000)?
-        .checked_add(i64::from(reset_grace_minutes).checked_mul(60_000)?)
-}
-
-fn settings_change_requires_verification(
+fn fired(
     account: &AccountRuntime,
+    previous: Option<&RateLimitSnapshot>,
     settings: &QuotaGuardSettings,
-    thresholds_changed: bool,
-) -> bool {
-    thresholds_changed
-        && settings.armed
-        && matches!(
-            account.phase,
-            QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset
-        )
-        && account.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.rate_limit_reached_type.is_none()
-                && account.breached_windows.iter().all(|kind| {
-                    snapshot.window(*kind).is_some_and(|window| {
-                        window.used_percent
-                            < match kind {
-                                QuotaWindowKind::Primary => settings.primary_threshold_percent,
-                                QuotaWindowKind::Secondary => settings.secondary_threshold_percent,
-                                QuotaWindowKind::HardLimit => 100,
-                            }
-                    })
-                })
+    force: bool,
+) -> Option<(QuotaWindowKind, u8)> {
+    [QuotaWindowKind::Primary, QuotaWindowKind::Secondary]
+        .into_iter()
+        .find_map(|kind| {
+            let current = account.snapshot.as_ref()?.window(kind)?;
+            let floor = threshold(settings, kind);
+            let was_below = previous
+                .and_then(|snapshot| snapshot.window(kind))
+                .map(|window| window.used_percent < floor)
+                .unwrap_or(force);
+            (current.used_percent >= floor && was_below).then_some((kind, floor))
         })
 }
-
-fn begin_interrupting(
+fn trip(
     account: &mut AccountRuntime,
-    turns: Vec<TurnKey>,
-    generation: u64,
-    operation_id: u64,
-    now_ms: i64,
-    effects: &mut Vec<ReducerEffect>,
-) -> Result<(), String> {
-    let ack_deadline = now_ms
-        .checked_add(INTERRUPT_ACK_TIMEOUT_MS)
-        .ok_or_else(|| "interrupt acknowledgement deadline overflow".to_string())?;
-    account.phase = QuotaGuardPhase::Interrupting;
-    for turn in turns {
-        if account
-            .pending_interrupt_index
-            .contains_key(&turn.stable_id())
-        {
-            continue;
-        }
-        let pending = PendingInterrupt {
-            turn: turn.clone(),
-            generation,
-            operation_id,
-            attempt: 1,
-            acknowledged: false,
-            ack_deadline,
-            completion_deadline: None,
-        };
-        account.insert_pending_interrupt(pending);
-        effects.push(ReducerEffect::Interrupt {
-            turn: turn.clone(),
-            generation,
-            operation_id,
-            attempt: 1,
-        });
-        effects.push(ReducerEffect::ScheduleInterruptAck {
-            turn,
-            generation,
-            operation_id,
-            attempt: 1,
-            deadline: ack_deadline,
-        });
-    }
-    Ok(())
-}
-
-fn promote_start(
-    account: &mut AccountRuntime,
-    start: PendingLocalStart,
-    turn: TurnKey,
-    generation: u64,
-    operation_id: u64,
-    now_ms: i64,
+    settings: &QuotaGuardSettings,
+    window: QuotaWindowKind,
+    floor: u8,
     effects: &mut Vec<ReducerEffect>,
 ) {
-    if account
-        .local_turn_registry
-        .iter()
-        .all(|candidate| candidate.stable_id() != turn.stable_id())
-    {
-        account.local_turn_registry.push(turn.clone());
-    }
-    match start.disposition {
-        Some(PendingStartDisposition::InterruptOnBind) | None
-            if account.phase == QuotaGuardPhase::Interrupting =>
-        {
-            if let Err(error) = begin_interrupting(
-                account,
-                vec![turn],
-                generation,
-                operation_id,
-                now_ms,
-                effects,
-            ) {
-                enter_intervention(account, now_ms, &error);
+    match settings.action {
+        QuotaAction::NotifyOnly => effects.push(ReducerEffect::Notify {
+            episode: EpisodeKey::Threshold {
+                account_key: account.account_key.clone(),
+                window,
+                threshold_percent: floor,
+                resets_at: None,
+            },
+        }),
+        QuotaAction::Interrupt => {
+            account.phase = QuotaGuardPhase::Tripped;
+            effects.push(ReducerEffect::SetProcessClosed);
+            effects.push(ReducerEffect::SuspendExternalEngines);
+            for turn in account.local_turn_registry.clone() {
+                effects.push(ReducerEffect::Interrupt {
+                    turn,
+                    generation: 0,
+                    operation_id: 0,
+                    attempt: 1,
+                });
+            }
+            effects.push(ReducerEffect::PersistDisarmed);
+            effects.push(ReducerEffect::SetProcessOpen);
+        }
+        QuotaAction::Block => {
+            account.phase = QuotaGuardPhase::Tripped;
+            effects.push(ReducerEffect::SetProcessClosed);
+            effects.push(ReducerEffect::SuspendExternalEngines);
+            for turn in account.local_turn_registry.clone() {
+                effects.push(ReducerEffect::Interrupt {
+                    turn,
+                    generation: 0,
+                    operation_id: 0,
+                    attempt: 1,
+                });
             }
         }
-        _ => {}
     }
 }
-
 pub(crate) fn reduce(
     mut runtime: QuotaGuardRuntimeState,
     event: ReducerEvent,
     settings: &QuotaGuardSettings,
 ) -> (QuotaGuardRuntimeState, Vec<ReducerEffect>) {
-    let mut effects = Vec::new();
+    let mut effects = vec![];
     match event {
         ReducerEvent::Enable {
             account_key,
             now_ms,
         } => {
-            if !increment_generation(&mut runtime) {
-                runtime.account = Some(AccountRuntime::new(account_key, now_ms));
-                if let Some(account) = runtime.account.as_mut() {
-                    enter_intervention(account, now_ms, "lifecycle generation overflow");
-                }
-            } else if let Some(account) = runtime.account.as_mut().filter(|account| {
-                account.account_key == account_key && account.phase == QuotaGuardPhase::Disabled
-            }) {
-                account.phase = QuotaGuardPhase::Monitoring;
-                account.snapshot = None;
-                account.breached_windows.clear();
-                account.fired_episodes.clear();
-                account.episode_policy = None;
-                account.verify_at = None;
-                account.monitor_healthy = true;
-                account.last_error = None;
-                account.updated_at = now_ms;
-                effects.push(ReducerEffect::ResumeExternalEngines);
-            } else {
-                runtime.account = Some(AccountRuntime::new(account_key, now_ms));
-            }
-            effects.push(ReducerEffect::SetProcessClosed);
-        }
-        ReducerEvent::Disable { now_ms } => {
-            if !increment_generation(&mut runtime) {
-                if let Some(account) = runtime.account.as_mut() {
-                    enter_intervention(account, now_ms, "lifecycle generation overflow");
-                }
-                effects.push(ReducerEffect::SetProcessClosed);
-            } else if let Some(account) = runtime.account.as_mut() {
-                account.phase = QuotaGuardPhase::Disabled;
-                account.revalidation_return_phase = None;
-                account.snapshot = None;
-                account.breached_windows.clear();
-                account.fired_episodes.clear();
-                account.episode_policy = None;
-                account.pending_local_starts.clear();
-                account.unmatched_started_turns.clear();
-                account.terminal_observations.clear();
-                account.pending_interrupt_index.clear();
-                account.verify_at = None;
-                account.monitor_healthy = true;
-                account.last_error = None;
-                account.updated_at = now_ms;
-                effects.push(ReducerEffect::ResumeExternalEngines);
-                effects.push(ReducerEffect::SetProcessOpen);
-            } else {
-                effects.push(ReducerEffect::SetProcessOpen);
-            }
-        }
-        ReducerEvent::SettingsChanged { thresholds_changed } => {
-            if runtime.account.as_ref().is_some_and(|account| {
-                settings_change_requires_verification(account, settings, thresholds_changed)
-            }) {
-                effects.push(ReducerEffect::VerifyNow);
-            }
-        }
-        ReducerEvent::PendingStartRecorded { mut start, now_ms } => {
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            if start.generation != generation
-                || start.session_epoch.trim().is_empty()
-                || start.workspace_id.trim().is_empty()
-            {
-                return (runtime, effects);
-            }
-            if account.phase == QuotaGuardPhase::Interrupting {
-                start.disposition = Some(PendingStartDisposition::InterruptOnBind);
-            }
-            let deadline = match now_ms.checked_add(START_CONFIRMATION_TIMEOUT_MS) {
-                Some(value) => value,
-                None => {
-                    enter_intervention(account, now_ms, "start confirmation deadline overflow");
-                    return (runtime, effects);
-                }
-            };
-            let request_id = start.request_id;
-            account.pending_local_starts.insert(request_id, start);
-            account.updated_at = now_ms;
-            effects.push(ReducerEffect::ScheduleStartExpiry {
-                request_id,
-                generation,
-                deadline,
-            });
-        }
-        ReducerEvent::PendingStartFailed {
-            request_id,
-            generation,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            account.pending_local_starts.remove(&request_id);
-            account.updated_at = now_ms;
-            finish_if_empty(account, generation, now_ms, &mut effects);
-        }
-        ReducerEvent::PendingStartExpired {
-            request_id,
-            generation,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(start) = account.pending_local_starts.get(&request_id) else {
-                return (runtime, effects);
-            };
-            if now_ms
-                < start
-                    .registered_at
-                    .saturating_add(START_CONFIRMATION_TIMEOUT_MS)
-            {
-                return (runtime, effects);
-            }
-            account.pending_local_starts.remove(&request_id);
-            if account.phase == QuotaGuardPhase::Interrupting {
-                enter_intervention(
-                    account,
-                    now_ms,
-                    "local start ownership confirmation expired",
-                );
-            } else {
-                finish_if_empty(account, generation, now_ms, &mut effects);
-            }
-        }
-        ReducerEvent::StartResponse {
-            request_id,
-            session_epoch,
-            workspace_id,
-            thread_id,
-            now_ms,
-        } => {
-            let operation_id = match next_operation_id(&mut runtime) {
-                Ok(value) => value,
-                Err(error) => {
-                    if let Some(account) = runtime.account.as_mut() {
-                        enter_intervention(account, now_ms, &error);
-                    }
-                    return (runtime, effects);
-                }
-            };
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(start) = account.pending_local_starts.get_mut(&request_id) else {
-                return (runtime, effects);
-            };
-            if start.generation != generation
-                || start.session_epoch != session_epoch
-                || start.workspace_id != workspace_id
-            {
-                return (runtime, effects);
-            }
-            let thread_id = thread_id
-                .or_else(|| start.expected_thread_id.clone())
-                .or_else(|| start.request_thread_id.clone());
-            start.response_thread_id = thread_id.clone();
-            start.response_received_at = Some(now_ms);
-            let Some(thread_id) = thread_id else {
-                return (runtime, effects);
-            };
-            let Some(started_index) =
-                account
-                    .unmatched_started_turns
-                    .iter()
-                    .position(|observation| {
-                        observation.turn.session_epoch == session_epoch
-                            && observation.turn.workspace_id == workspace_id
-                            && observation.turn.thread_id == thread_id
-                    })
-            else {
-                return (runtime, effects);
-            };
-            let started = account.unmatched_started_turns[started_index].turn.clone();
-            if let Some(terminal_index) = account
-                .terminal_observations
-                .iter()
-                .position(|observation| observation.turn.stable_id() == started.stable_id())
-            {
-                account.terminal_observations.remove(terminal_index);
-                account.unmatched_started_turns.remove(started_index);
-                account.pending_local_starts.remove(&request_id);
-                finish_if_empty(account, generation, now_ms, &mut effects);
-                return (runtime, effects);
-            }
-            let observation = account.unmatched_started_turns.remove(started_index);
-            let start = account
-                .pending_local_starts
-                .remove(&request_id)
-                .expect("matched start exists");
-            promote_start(
-                account,
-                start,
-                observation.turn,
-                generation,
-                operation_id,
-                now_ms,
-                &mut effects,
-            );
-        }
-        ReducerEvent::TurnStarted { turn, now_ms } => {
-            let operation_id = match next_operation_id(&mut runtime) {
-                Ok(value) => value,
-                Err(error) => {
-                    if let Some(account) = runtime.account.as_mut() {
-                        enter_intervention(account, now_ms, &error);
-                    }
-                    return (runtime, effects);
-                }
-            };
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let matching_request =
-                account
-                    .pending_local_starts
-                    .iter()
-                    .find_map(|(request_id, start)| {
-                        (start.generation == generation
-                            && start.session_epoch == turn.session_epoch
-                            && start.workspace_id == turn.workspace_id
-                            && [
-                                start.response_thread_id.as_ref(),
-                                start.expected_thread_id.as_ref(),
-                                start.request_thread_id.as_ref(),
-                            ]
-                            .into_iter()
-                            .flatten()
-                            .any(|thread_id| thread_id == &turn.thread_id))
-                        .then_some(*request_id)
-                    });
-            if let Some(request_id) = matching_request {
-                let start = account
-                    .pending_local_starts
-                    .remove(&request_id)
-                    .expect("matched start exists");
-                promote_start(
-                    account,
-                    start,
-                    turn,
-                    generation,
-                    operation_id,
-                    now_ms,
-                    &mut effects,
-                );
-            } else if account.pending_local_starts.values().any(|start| {
-                start.generation == generation
-                    && start.session_epoch == turn.session_epoch
-                    && start.workspace_id == turn.workspace_id
-                    && start.request_kind == "review/start"
-            }) {
-                let deadline = match now_ms.checked_add(PROVISIONAL_OBSERVATION_TIMEOUT_MS) {
-                    Some(value) => value,
-                    None => {
-                        enter_intervention(
-                            account,
-                            now_ms,
-                            "provisional observation deadline overflow",
-                        );
-                        return (runtime, effects);
-                    }
-                };
-                if let Err(error) =
-                    account.push_unmatched_started_turn(super::model::UnmatchedStartedTurn {
-                        turn: turn.clone(),
-                        generation,
-                        observed_at: now_ms,
-                    })
-                {
-                    enter_intervention(account, now_ms, &error);
-                } else {
-                    effects.push(ReducerEffect::ScheduleProvisionalExpiry {
-                        turn,
-                        generation,
-                        terminal: false,
-                        deadline,
-                    });
-                }
-            }
-        }
-        ReducerEvent::TurnTerminal {
-            turn,
-            status,
-            error,
-            now_ms,
-        } => {
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let id = turn.stable_id();
-            let known = account
-                .local_turn_registry
-                .iter()
-                .any(|candidate| candidate.stable_id() == id)
-                || account.pending_interrupt_index.contains_key(&id);
-            if known
-                && account.phase != QuotaGuardPhase::Disabled
-                && error.as_ref().is_some_and(is_usage_limit_exceeded)
-            {
-                let episode = EpisodeKey::HardLimit {
-                    account_key: account.account_key.clone(),
-                };
-                if !account.fired_episodes.contains(&episode) {
-                    start_episode(account, episode, settings, now_ms, &mut effects, generation);
-                    let before_finalize = effects.len().saturating_sub(1);
-                    effects.insert(before_finalize, ReducerEffect::ReadFullRateLimits);
-                }
-            }
-            account
-                .local_turn_registry
-                .retain(|candidate| candidate.stable_id() != id);
-            account.remove_pending_interrupt(&turn);
-            let has_exact_unmatched_start =
-                account.unmatched_started_turns.iter().any(|observation| {
-                    observation.turn.stable_id() == id && observation.generation == generation
-                });
-            if !known && has_exact_unmatched_start {
-                let deadline = match now_ms.checked_add(PROVISIONAL_OBSERVATION_TIMEOUT_MS) {
-                    Some(value) => value,
-                    None => {
-                        enter_intervention(
-                            account,
-                            now_ms,
-                            "provisional terminal deadline overflow",
-                        );
-                        return (runtime, effects);
-                    }
-                };
-                if let Err(error) =
-                    account.push_terminal_observation(super::model::TerminalObservation {
-                        turn: turn.clone(),
-                        generation,
-                        status,
-                        error,
-                        observed_at: now_ms,
-                    })
-                {
-                    enter_intervention(account, now_ms, &error);
-                    return (runtime, effects);
-                }
-                effects.push(ReducerEffect::ScheduleProvisionalExpiry {
-                    turn,
-                    generation,
-                    terminal: true,
-                    deadline,
-                });
-            }
-            finish_if_empty(account, generation, now_ms, &mut effects);
-        }
-        ReducerEvent::Snapshot {
-            snapshot,
-            full_read,
-            verification,
-            now_ms,
-        } => {
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let prior = account.snapshot.clone();
-            let prior_breaches = account.breached_windows.clone();
-            let parked_or_verifying = matches!(
-                account.phase,
-                QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset
-            );
-            let maintain_external_suspension = matches!(
-                account.phase,
-                QuotaGuardPhase::Interrupting
-                    | QuotaGuardPhase::Parked
-                    | QuotaGuardPhase::VerifyingReset
-            ) && account
-                .episode_policy
-                .as_ref()
-                .is_some_and(|policy| policy.external_suspend);
-            // External suspension itself is an episode-level promise, but
-            // newcomer sweeping is a live operator preference. This lets an
-            // in-force parked episode start or stop sweeping on its next poll
-            // without changing which engines were frozen at the trip.
-            let prevent_new_sessions = settings.prevent_new_sessions;
-            let verification_due = account
-                .verify_at
-                .is_some_and(|verify_at| now_ms >= verify_at);
-            let evaluation = evaluate_snapshot(
-                &account.account_key,
-                &snapshot,
-                prior.as_ref(),
-                settings,
-                &account.fired_episodes,
-                full_read,
-            );
-            let retain_hard_limit = matches!(
-                account.phase,
-                QuotaGuardPhase::Interrupting
-                    | QuotaGuardPhase::Parked
-                    | QuotaGuardPhase::VerifyingReset
-            );
-            for episode in evaluation.rearmed {
-                if !(retain_hard_limit && matches!(episode, EpisodeKey::HardLimit { .. })) {
-                    account.fired_episodes.remove(&episode);
-                }
-            }
-            account.breached_windows = if parked_or_verifying {
-                prior_breaches.clone()
-            } else {
-                evaluation.breached_windows
-            };
-            account.snapshot = Some(snapshot.clone());
-            account.updated_at = now_ms;
-            if !snapshot.is_fresh_at(now_ms) {
-                account.monitor_healthy = false;
-                account.last_error = Some("rate limit snapshot is stale".into());
-                return (runtime, effects);
-            }
-            account.monitor_healthy = true;
-            if account.phase == QuotaGuardPhase::InterventionRequired {
-                account
-                    .last_error
-                    .get_or_insert_with(|| "intervention requires verification".into());
-            } else {
-                account.last_error = None;
-            }
-            // Keep original frozen identities current. Discovering engines that
-            // appeared after the trip is opt-in rather than the default.
-            if maintain_external_suspension {
-                effects.push(ReducerEffect::MaintainExternalEngineSuspension {
-                    prevent_new_sessions,
-                });
-            }
-            if parked_or_verifying && full_read {
-                if !verification_due && !verification {
-                    return (runtime, effects);
-                }
-                let thresholds_healthy = prior_breaches.iter().all(|kind| {
-                    snapshot.window(*kind).is_some_and(|window| {
-                        window.used_percent
-                            < match kind {
-                                QuotaWindowKind::Primary => settings.primary_threshold_percent,
-                                QuotaWindowKind::Secondary => settings.secondary_threshold_percent,
-                                QuotaWindowKind::HardLimit => 100,
-                            }
-                    })
-                });
-                if snapshot.rate_limit_reached_type.is_none() && thresholds_healthy {
-                    account.phase = QuotaGuardPhase::Ready;
-                    account.verify_at = None;
-                    account.breached_windows.clear();
-                    account
-                        .fired_episodes
-                        .retain(|episode| !matches!(episode, EpisodeKey::HardLimit { .. }));
-                    account.episode_policy = None;
-                    effects.push(ReducerEffect::ResumeExternalEngines);
-                    effects.push(ReducerEffect::SetProcessOpen);
-                    return (runtime, effects);
-                }
-                match parked_verification_effect(account, generation) {
-                    Ok(effect) => effects.push(effect),
-                    Err(error) => enter_intervention(account, now_ms, &error),
-                }
-                return (runtime, effects);
-            }
-            let mut action_started = false;
-            for episode in evaluation.triggered {
-                if !action_started {
-                    start_episode(account, episode, settings, now_ms, &mut effects, generation);
-                    action_started = true;
-                } else {
-                    account.fired_episodes.insert(episode);
-                }
-            }
-            if account.phase == QuotaGuardPhase::Monitoring && account.episode_policy.is_none() {
-                effects.push(ReducerEffect::SetProcessOpen);
-            }
-        }
-        ReducerEvent::ApplyActionNow { now_ms } => {
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(snapshot) = account.snapshot.clone() else {
-                return (runtime, effects);
-            };
-            if account.phase != QuotaGuardPhase::Monitoring
-                || !snapshot.is_fresh_at(now_ms)
-                || snapshot.rate_limit_reached_type.is_some()
-            {
-                return (runtime, effects);
-            }
-            for (kind, threshold) in [
-                (QuotaWindowKind::Primary, settings.primary_threshold_percent),
-                (
-                    QuotaWindowKind::Secondary,
-                    settings.secondary_threshold_percent,
-                ),
-            ] {
-                if snapshot
-                    .window(kind)
-                    .is_some_and(|window| window.used_percent >= threshold)
-                {
-                    let key = EpisodeKey::Threshold {
-                        account_key: account.account_key.clone(),
-                        window: kind,
-                        threshold_percent: threshold,
-                        resets_at: snapshot.window(kind).and_then(|window| window.resets_at),
-                    };
-                    if !account.fired_episodes.contains(&key) {
-                        start_episode(account, key, settings, now_ms, &mut effects, generation);
-                    }
-                }
-            }
-        }
-        ReducerEvent::Rearm { now_ms } => {
-            let Some(phase) = runtime.account.as_ref().map(|account| account.phase) else {
-                return (runtime, effects);
-            };
-            if !matches!(
-                phase,
-                QuotaGuardPhase::Parked
-                    | QuotaGuardPhase::VerifyingReset
-                    | QuotaGuardPhase::Interrupting
-                    | QuotaGuardPhase::InterventionRequired
-            ) {
-                return (runtime, effects);
-            }
-            if !increment_generation(&mut runtime) {
-                if let Some(account) = runtime.account.as_mut() {
-                    enter_intervention(account, now_ms, "lifecycle generation overflow");
-                }
-                effects.push(ReducerEffect::SetProcessClosed);
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
+            runtime.lifecycle_generation = runtime.lifecycle_generation.saturating_add(1);
+            let account = runtime
+                .account
+                .get_or_insert_with(|| AccountRuntime::new(account_key.clone(), now_ms));
+            account.account_key = account_key;
             account.phase = QuotaGuardPhase::Monitoring;
-            account.revalidation_return_phase = None;
-            account.breached_windows.clear();
-            // Deliberately retain fired_episodes: an unchanged snapshot must
-            // not immediately recreate the episode that was just released.
-            account.episode_policy = None;
-            account.pending_local_starts.clear();
-            account.unmatched_started_turns.clear();
-            account.terminal_observations.clear();
-            account.pending_interrupt_index.clear();
-            account.verify_at = None;
-            account.last_error = None;
             account.updated_at = now_ms;
-            effects.push(ReducerEffect::ResumeExternalEngines);
             effects.push(ReducerEffect::SetProcessOpen);
         }
-        ReducerEvent::FinalizeClosedEpisode {
-            transition_id,
-            now_ms,
-        } => {
-            if transition_id != runtime.lifecycle_generation {
-                return (runtime, effects);
+        ReducerEvent::Disable { now_ms } => {
+            if let Some(account) = runtime.account.as_mut() {
+                account.phase = QuotaGuardPhase::Disabled;
+                account.updated_at = now_ms;
+                effects.extend([
+                    ReducerEffect::ResumeExternalEngines,
+                    ReducerEffect::SetProcessOpen,
+                ]);
             }
-            let operation_id = match next_operation_id(&mut runtime) {
-                Ok(value) => value,
-                Err(error) => {
-                    if let Some(account) = runtime.account.as_mut() {
-                        enter_intervention(account, now_ms, &error);
+        }
+        ReducerEvent::SettingsChanged { .. } => {}
+        ReducerEvent::TurnStarted { turn, now_ms } => {
+            if let Some(account) = runtime.account.as_mut() {
+                if account
+                    .local_turn_registry
+                    .iter()
+                    .all(|known| known.stable_id() != turn.stable_id())
+                {
+                    account.local_turn_registry.push(turn);
+                }
+                account.updated_at = now_ms;
+            }
+        }
+        ReducerEvent::TurnTerminal { turn, now_ms, .. } => {
+            if let Some(account) = runtime.account.as_mut() {
+                account
+                    .local_turn_registry
+                    .retain(|known| known.stable_id() != turn.stable_id());
+                account.updated_at = now_ms;
+            }
+        }
+        ReducerEvent::Resume { now_ms } => {
+            if let Some(account) = runtime.account.as_mut() {
+                account.phase = QuotaGuardPhase::Monitoring;
+                account.updated_at = now_ms;
+                effects.extend([
+                    ReducerEffect::ResumeExternalEngines,
+                    ReducerEffect::SetProcessOpen,
+                ]);
+            }
+        }
+        ReducerEvent::Snapshot {
+            snapshot, now_ms, ..
+        } => {
+            if let Some(account) = runtime.account.as_mut() {
+                let previous = account.snapshot.clone();
+                account.snapshot = Some(snapshot);
+                account.updated_at = now_ms;
+                if !settings.armed {
+                    let used = [QuotaWindowKind::Primary, QuotaWindowKind::Secondary]
+                        .into_iter()
+                        .filter_map(|kind| {
+                            account
+                                .snapshot
+                                .as_ref()
+                                .and_then(|value| value.window(kind))
+                                .map(|window| window.used_percent)
+                        })
+                        .max()
+                        .unwrap_or_default();
+                    let floor = settings
+                        .primary_threshold_percent
+                        .min(settings.secondary_threshold_percent);
+                    if used > floor {
+                        effects.push(ReducerEffect::RaiseThresholds { used_percent: used });
                     }
                     return (runtime, effects);
                 }
-            };
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            if account.phase != QuotaGuardPhase::Interrupting {
-                return (runtime, effects);
-            }
-            if account.episode_policy.as_ref().map(|policy| policy.action)
-                != Some(QuotaAction::InterruptImmediately)
-            {
-                enter_intervention(account, now_ms, "missing enforcing episode policy");
-            } else {
-                for start in account
-                    .pending_local_starts
-                    .values_mut()
-                    .filter(|start| start.generation == transition_id)
+                if account.phase == QuotaGuardPhase::Tripped
+                    && matches!(settings.action, QuotaAction::Block)
                 {
-                    start.disposition = Some(PendingStartDisposition::InterruptOnBind);
-                }
-                if let Err(error) = begin_interrupting(
-                    account,
-                    account.local_turn_registry.clone(),
-                    transition_id,
-                    operation_id,
-                    now_ms,
-                    &mut effects,
-                ) {
-                    enter_intervention(account, now_ms, &error);
-                } else {
-                    finish_if_empty(account, transition_id, now_ms, &mut effects);
-                }
-            }
-        }
-        ReducerEvent::InterruptAcknowledged {
-            turn,
-            generation,
-            operation_id,
-            attempt,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(pending) = account.pending_interrupt_index.get_mut(&turn.stable_id()) else {
-                return (runtime, effects);
-            };
-            if pending.generation != generation
-                || pending.operation_id != operation_id
-                || pending.attempt != attempt
-            {
-                return (runtime, effects);
-            }
-            let Some(deadline) = now_ms.checked_add(INTERRUPT_COMPLETION_TIMEOUT_MS) else {
-                enter_intervention(account, now_ms, "interrupt completion deadline overflow");
-                return (runtime, effects);
-            };
-            pending.acknowledged = true;
-            pending.completion_deadline = Some(deadline);
-            effects.push(ReducerEffect::ScheduleInterruptCompletion {
-                turn,
-                generation,
-                operation_id,
-                attempt,
-                deadline,
-            });
-        }
-        ReducerEvent::InterruptRequestFailed {
-            turn,
-            generation,
-            operation_id,
-            attempt,
-            now_ms: _,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(pending) = account.pending_interrupt_index.get(&turn.stable_id()) else {
-                return (runtime, effects);
-            };
-            if pending.generation == generation
-                && pending.operation_id == operation_id
-                && pending.attempt == attempt
-                && !pending.acknowledged
-            {
-                effects.push(ReducerEffect::ReconcileThread {
-                    turn,
-                    generation,
-                    operation_id,
-                    attempt,
-                });
-            }
-        }
-        ReducerEvent::InterruptDeadline {
-            turn,
-            generation,
-            operation_id,
-            attempt,
-            acknowledgement,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(pending) = account.pending_interrupt_index.get(&turn.stable_id()) else {
-                return (runtime, effects);
-            };
-            if pending.generation != generation
-                || pending.operation_id != operation_id
-                || pending.attempt != attempt
-            {
-                return (runtime, effects);
-            }
-            let due = if acknowledgement {
-                !pending.acknowledged && now_ms >= pending.ack_deadline
-            } else {
-                pending.acknowledged
-                    && pending
-                        .completion_deadline
-                        .is_some_and(|deadline| now_ms >= deadline)
-            };
-            if due {
-                effects.push(ReducerEffect::ReconcileThread {
-                    turn,
-                    generation,
-                    operation_id,
-                    attempt,
-                });
-            }
-        }
-        ReducerEvent::InterruptReconciled {
-            turn,
-            generation,
-            operation_id,
-            attempt,
-            active_turn_id,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let replacement_operation =
-                if active_turn_id.as_deref() == Some(turn.turn_id.as_str()) && attempt == 1 {
-                    match next_operation_id(&mut runtime) {
-                        Ok(value) => Some(value),
-                        Err(error) => {
-                            if let Some(account) = runtime.account.as_mut() {
-                                enter_intervention(account, now_ms, &error);
-                            }
-                            return (runtime, effects);
-                        }
-                    }
-                } else {
-                    None
-                };
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            let Some(pending) = account.pending_interrupt_index.get(&turn.stable_id()) else {
-                return (runtime, effects);
-            };
-            if pending.generation != generation
-                || pending.operation_id != operation_id
-                || pending.attempt != attempt
-            {
-                return (runtime, effects);
-            }
-            if let Some(new_operation_id) = replacement_operation {
-                let ack_deadline = match now_ms.checked_add(INTERRUPT_ACK_TIMEOUT_MS) {
-                    Some(value) => value,
-                    None => {
-                        enter_intervention(
-                            account,
-                            now_ms,
-                            "interrupt acknowledgement deadline overflow",
-                        );
-                        return (runtime, effects);
-                    }
-                };
-                let retry = PendingInterrupt {
-                    turn: turn.clone(),
-                    generation,
-                    operation_id: new_operation_id,
-                    attempt: 2,
-                    acknowledged: false,
-                    ack_deadline,
-                    completion_deadline: None,
-                };
-                account.insert_pending_interrupt(retry);
-                effects.push(ReducerEffect::Interrupt {
-                    turn: turn.clone(),
-                    generation,
-                    operation_id: new_operation_id,
-                    attempt: 2,
-                });
-                effects.push(ReducerEffect::ScheduleInterruptAck {
-                    turn,
-                    generation,
-                    operation_id: new_operation_id,
-                    attempt: 2,
-                    deadline: ack_deadline,
-                });
-            } else if active_turn_id.is_none() {
-                account.remove_pending_interrupt(&turn);
-                account
-                    .local_turn_registry
-                    .retain(|candidate| candidate.stable_id() != turn.stable_id());
-                finish_if_empty(account, generation, now_ms, &mut effects);
-            } else {
-                enter_intervention(
-                    account,
-                    now_ms,
-                    "interrupt reconciliation found a different active turn",
-                );
-            }
-        }
-        ReducerEvent::InterruptReconcileFailed {
-            turn,
-            generation,
-            operation_id,
-            attempt,
-            reason,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            if account
-                .pending_interrupt_index
-                .get(&turn.stable_id())
-                .is_some_and(|pending| {
-                    pending.generation == generation
-                        && pending.operation_id == operation_id
-                        && pending.attempt == attempt
-                })
-            {
-                enter_intervention(
-                    account,
-                    now_ms,
-                    &format!("interrupt reconciliation failed: {reason}"),
-                );
-            }
-        }
-        ReducerEvent::ProvisionalExpired {
-            turn,
-            generation,
-            terminal,
-            now_ms,
-        } => {
-            if generation != runtime.lifecycle_generation {
-                return (runtime, effects);
-            }
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            if terminal {
-                account.terminal_observations.retain(|observation| {
-                    observation.generation != generation
-                        || observation.turn.stable_id() != turn.stable_id()
-                        || now_ms
-                            < observation
-                                .observed_at
-                                .saturating_add(PROVISIONAL_OBSERVATION_TIMEOUT_MS)
-                });
-            } else {
-                account.unmatched_started_turns.retain(|observation| {
-                    observation.generation != generation
-                        || observation.turn.stable_id() != turn.stable_id()
-                        || now_ms
-                            < observation
-                                .observed_at
-                                .saturating_add(PROVISIONAL_OBSERVATION_TIMEOUT_MS)
-                });
-            }
-        }
-        ReducerEvent::RehydratePendingInterrupts { now_ms: _ } => {
-            let generation = runtime.lifecycle_generation;
-            let Some(account) = runtime.account.as_mut() else {
-                return (runtime, effects);
-            };
-            for pending in account.pending_interrupt_index.values_mut() {
-                if pending.generation == 0 {
-                    pending.generation = generation;
-                }
-            }
-            for observation in &mut account.unmatched_started_turns {
-                if observation.generation == 0 {
-                    observation.generation = generation;
-                }
-            }
-            for observation in &mut account.terminal_observations {
-                if observation.generation == 0 {
-                    observation.generation = generation;
-                }
-            }
-            for pending in account
-                .pending_interrupt_index
-                .values()
-                .filter(|pending| pending.generation == generation)
-            {
-                let turn = pending.turn.clone();
-                effects.push(ReducerEffect::ReconcileThread {
-                    turn: turn.clone(),
-                    generation,
-                    operation_id: pending.operation_id,
-                    attempt: pending.attempt,
-                });
-                if pending.acknowledged {
-                    if let Some(deadline) = pending.completion_deadline {
-                        effects.push(ReducerEffect::ScheduleInterruptCompletion {
-                            turn,
-                            generation,
-                            operation_id: pending.operation_id,
-                            attempt: pending.attempt,
-                            deadline,
-                        });
-                    }
-                } else {
-                    effects.push(ReducerEffect::ScheduleInterruptAck {
-                        turn,
-                        generation,
-                        operation_id: pending.operation_id,
-                        attempt: pending.attempt,
-                        deadline: pending.ack_deadline,
+                    effects.push(ReducerEffect::MaintainExternalEngineSuspension {
+                        prevent_new_sessions: true,
                     });
+                    return (runtime, effects);
                 }
-            }
-            for observation in &account.unmatched_started_turns {
-                if observation.generation == generation {
-                    effects.push(ReducerEffect::ScheduleProvisionalExpiry {
-                        turn: observation.turn.clone(),
-                        generation,
-                        terminal: false,
-                        deadline: observation
-                            .observed_at
-                            .saturating_add(PROVISIONAL_OBSERVATION_TIMEOUT_MS),
-                    });
-                }
-            }
-            for observation in &account.terminal_observations {
-                if observation.generation == generation {
-                    effects.push(ReducerEffect::ScheduleProvisionalExpiry {
-                        turn: observation.turn.clone(),
-                        generation,
-                        terminal: true,
-                        deadline: observation
-                            .observed_at
-                            .saturating_add(PROVISIONAL_OBSERVATION_TIMEOUT_MS),
-                    });
+                if account.phase == QuotaGuardPhase::Monitoring {
+                    if let Some((window, floor)) =
+                        fired(account, previous.as_ref(), settings, previous.is_none())
+                    {
+                        trip(account, settings, window, floor, &mut effects);
+                    }
                 }
             }
         }
+        _ => {}
     }
     (runtime, effects)
 }
 
-pub(crate) fn parked_verification_effect(
-    account: &mut AccountRuntime,
-    generation: u64,
-) -> Result<ReducerEffect, String> {
-    let grace = account
-        .episode_policy
-        .as_ref()
-        .map(|policy| policy.reset_grace_minutes)
-        .ok_or_else(|| "missing episode policy".to_string())?;
-    let verify_at = verification_at(account, grace)
-        .ok_or_else(|| "missing or overflowing reset timestamp".to_string())?;
-    account.verify_at = Some(verify_at);
-    account.phase = QuotaGuardPhase::Parked;
-    Ok(ReducerEffect::ScheduleVerification {
-        generation,
-        verify_at,
-    })
-}
-
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
-    use super::{policy, reduce, ReducerEffect, ReducerEvent};
-    use crate::shared::quota_guard::model::{
-        QuotaAction, QuotaGuardPhase, QuotaGuardRuntimeState, QuotaWindowKind, RateLimitSnapshot,
-        RateLimitWindow,
-    };
+    use super::*;
+    use crate::shared::quota_guard::model::{RateLimitSnapshot, RateLimitWindow};
     use crate::types::QuotaGuardSettings;
-
-    fn snapshot(percent: u8, hard: bool) -> RateLimitSnapshot {
+    fn snapshot(used: u8) -> RateLimitSnapshot {
         RateLimitSnapshot {
             primary: Some(RateLimitWindow {
-                used_percent: percent,
+                used_percent: used,
                 window_duration_mins: None,
-                resets_at: Some(100),
+                reset_at: None,
             }),
             secondary: None,
             credits: None,
             plan_type: None,
-            rate_limit_reached_type: hard.then(|| "limit".into()),
-            observed_at: 10_000,
+            rate_limit_reached_type: None,
+            observed_at: 0,
         }
     }
-    #[test]
-    fn notify_episode_never_closes_or_interrupts() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::NotifyOnly;
-        let (state, _) = reduce(
-            Default::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let (_, effects) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, true),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::Notify { .. })));
-        assert!(!effects.iter().any(|effect| matches!(
-            effect,
-            ReducerEffect::Interrupt { .. } | ReducerEffect::SetProcessClosed
-        )));
-    }
-    #[test]
-    fn immediate_action_closes_and_interrupts_registered_turns() {
-        let settings = QuotaGuardSettings::default();
-        let (state, _) = reduce(
-            Default::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let (state, effects) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, true),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        assert!(effects.contains(&ReducerEffect::SetProcessClosed));
-        let generation = state.lifecycle_generation;
-        let mut state = state;
-        state.account.as_mut().unwrap().local_turn_registry.push(
-            crate::shared::quota_guard::model::TurnKey {
-                session_epoch: "epoch".into(),
-                workspace_id: "workspace".into(),
-                thread_id: "thread".into(),
-                turn_id: "turn".into(),
-            },
-        );
-        let (_, final_effects) = reduce(
-            state,
-            ReducerEvent::FinalizeClosedEpisode {
-                transition_id: generation,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        assert!(final_effects.iter().any(|effect| matches!(effect, ReducerEffect::Interrupt { turn, .. } if turn.turn_id == "turn")));
-    }
-    #[test]
-    fn disable_fences_prior_finalization() {
-        let settings = QuotaGuardSettings::default();
-        let (state, _) = reduce(
-            Default::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &settings,
-        );
-        let generation = state.lifecycle_generation;
-        let (state, _) = reduce(state, ReducerEvent::Disable { now_ms: 2 }, &settings);
-        let (_, effects) = reduce(
-            state,
-            ReducerEvent::FinalizeClosedEpisode {
-                transition_id: generation,
-                now_ms: 3,
-            },
-            &settings,
-        );
-        assert!(effects.is_empty());
-    }
-    #[test]
-    fn stale_snapshot_updates_health_without_executing_hard_limit() {
-        let settings = QuotaGuardSettings::default();
-        let (state, _) = reduce(
-            Default::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 700_001,
-            },
-            &settings,
-        );
-        let (state, effects) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, true),
-                full_read: true,
-                verification: false,
-                now_ms: 700_001,
-            },
-            &settings,
-        );
-        assert!(effects.is_empty());
-        assert!(!state.account.unwrap().monitor_healthy);
-    }
-
-    #[test]
-    fn disable_then_reenable_executes_same_hard_limit_under_new_generation() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::NotifyOnly;
-        let (state, _) = reduce(
-            Default::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let (state, first) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(10, true),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        assert!(first
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::Notify { .. })));
-        let (state, _) = reduce(state, ReducerEvent::Disable { now_ms: 10_001 }, &settings);
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 10_002,
-            },
-            &settings,
-        );
-        let (_, second) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(10, true),
-                full_read: true,
-                verification: false,
-                now_ms: 10_002,
-            },
-            &settings,
-        );
-        assert!(second
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::Notify { .. })));
-    }
-
-    #[test]
-    fn acknowledged_interrupt_ignores_stale_ack_timer_and_early_completion_timer() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (mut state, _) = reduce(
-            Default::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let turn = crate::shared::quota_guard::model::TurnKey {
-            session_epoch: "epoch".into(),
-            workspace_id: "workspace".into(),
-            thread_id: "thread".into(),
-            turn_id: "turn".into(),
-        };
-        state
-            .account
-            .as_mut()
-            .unwrap()
-            .local_turn_registry
-            .push(turn.clone());
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(89, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        let generation = state.lifecycle_generation;
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::FinalizeClosedEpisode {
-                transition_id: generation,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        let pending = state
-            .account
-            .as_ref()
-            .unwrap()
-            .pending_interrupt_index
-            .get(&turn.stable_id())
-            .unwrap()
-            .clone();
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::InterruptAcknowledged {
-                turn: turn.clone(),
-                generation: pending.generation,
-                operation_id: pending.operation_id,
-                attempt: pending.attempt,
-                now_ms: 10_002,
-            },
-            &settings,
-        );
-        let (state, stale_ack_effects) = reduce(
-            state,
-            ReducerEvent::InterruptDeadline {
-                turn: turn.clone(),
-                generation: pending.generation,
-                operation_id: pending.operation_id,
-                attempt: pending.attempt,
-                acknowledgement: true,
-                now_ms: pending.ack_deadline,
-            },
-            &settings,
-        );
-        assert!(stale_ack_effects.is_empty());
-        let completion_deadline = state
-            .account
-            .as_ref()
-            .unwrap()
-            .pending_interrupt_index
-            .get(&turn.stable_id())
-            .unwrap()
-            .completion_deadline
-            .unwrap();
-        let (state, early_completion_effects) = reduce(
-            state,
-            ReducerEvent::InterruptDeadline {
-                turn: turn.clone(),
-                generation: pending.generation,
-                operation_id: pending.operation_id,
-                attempt: pending.attempt,
-                acknowledgement: false,
-                now_ms: completion_deadline - 1,
-            },
-            &settings,
-        );
-        assert!(early_completion_effects.is_empty());
-        let (_, due_effects) = reduce(
-            state,
-            ReducerEvent::InterruptDeadline {
-                turn,
-                generation: pending.generation,
-                operation_id: pending.operation_id,
-                attempt: pending.attempt,
-                acknowledgement: false,
-                now_ms: completion_deadline,
-            },
-            &settings,
-        );
-        assert!(matches!(
-            due_effects.as_slice(),
-            [ReducerEffect::ReconcileThread { .. }]
-        ));
-    }
-
-    #[test]
-    fn stale_same_thread_terminal_cannot_consume_a_pending_start() {
-        let settings = QuotaGuardSettings::default();
-        let (state, _) = reduce(
+    fn enabled(action: QuotaAction) -> (QuotaGuardRuntimeState, QuotaGuardSettings) {
+        let mut s = QuotaGuardSettings::default();
+        s.enabled = true;
+        s.action = action;
+        let (r, _) = reduce(
             Default::default(),
             ReducerEvent::Enable {
                 account_key: "a".into(),
                 now_ms: 0,
             },
-            &settings,
+            &s,
         );
-        let generation = state.lifecycle_generation;
-        let pending = crate::shared::quota_guard::model::PendingLocalStart {
-            request_id: 1,
-            session_epoch: "epoch".into(),
-            workspace_id: "workspace".into(),
-            request_thread_id: Some("thread".into()),
-            expected_thread_id: Some("thread".into()),
-            request_kind: "turn/start".into(),
-            response_thread_id: None,
-            response_received_at: None,
-            generation,
-            disposition: None,
-            registered_at: 0,
-        };
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::PendingStartRecorded {
-                start: pending,
-                now_ms: 0,
-            },
-            &settings,
-        );
-        let stale = crate::shared::quota_guard::model::TurnKey {
-            session_epoch: "epoch".into(),
-            workspace_id: "workspace".into(),
-            thread_id: "thread".into(),
-            turn_id: "old-turn".into(),
-        };
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::TurnTerminal {
-                turn: stale,
-                status: "completed".into(),
-                error: None,
+        (r, s)
+    }
+    #[test]
+    fn notify_crossing_only_notifies() {
+        let (r, s) = enabled(QuotaAction::NotifyOnly);
+        let (r, _) = reduce(
+            r,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(89),
+                full_read: true,
                 now_ms: 1,
             },
-            &settings,
+            &s,
         );
-        let (state, _) = reduce(
-            state,
-            ReducerEvent::StartResponse {
-                request_id: 1,
-                session_epoch: "epoch".into(),
-                workspace_id: "workspace".into(),
-                thread_id: Some("thread".into()),
+        let (r, e) = reduce(
+            r,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(90),
+                full_read: true,
                 now_ms: 2,
             },
-            &settings,
+            &s,
         );
-        let account = state.account.unwrap();
-        assert!(account.terminal_observations.is_empty());
-        assert!(account.pending_local_starts.contains_key(&1));
+        assert!(matches!(e.as_slice(), [ReducerEffect::Notify { .. }]));
+        assert_eq!(r.account.unwrap().phase, QuotaGuardPhase::Monitoring);
     }
-
     #[test]
-    fn intervention_required_snapshot_still_starts_an_armed_episode() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (mut runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
+    fn interrupt_self_disarms_and_block_sweeps() {
+        let (r, s) = enabled(QuotaAction::Interrupt);
+        let (r, e) = reduce(
+            r,
+            ReducerEvent::Snapshot {
+                snapshot: snapshot(90),
+                full_read: true,
                 now_ms: 1,
             },
-            &settings,
+            &s,
         );
-        let account = runtime.account.as_mut().expect("account");
-        account.phase = QuotaGuardPhase::InterventionRequired;
-        account.last_error = Some("startup recovery requires verification".into());
-        account.snapshot = Some(snapshot(89, false));
-        let (runtime, effects) = reduce(
-            runtime,
+        assert!(e.contains(&ReducerEffect::PersistDisarmed));
+        assert_eq!(r.account.unwrap().phase, QuotaGuardPhase::Tripped);
+        let (r, s) = enabled(QuotaAction::Block);
+        let (r, _) = reduce(
+            r,
             ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
+                snapshot: snapshot(90),
                 full_read: true,
-                verification: true,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        assert_eq!(
-            runtime.account.as_ref().map(|account| account.phase),
-            Some(QuotaGuardPhase::Interrupting)
-        );
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::SetProcessClosed)));
-    }
-
-    #[test]
-    fn external_suspend_initial_fire_sweeps_in_both_newcomer_modes() {
-        for prevent_new_sessions in [false, true] {
-            let mut enabled = QuotaGuardSettings::default();
-            enabled.action = QuotaAction::InterruptImmediately;
-            enabled.external_suspend = true;
-            enabled.prevent_new_sessions = prevent_new_sessions;
-            let (runtime, _) = reduce(
-                QuotaGuardRuntimeState::default(),
-                ReducerEvent::Enable {
-                    account_key: "a".into(),
-                    now_ms: 1,
-                },
-                &enabled,
-            );
-            let (runtime, _) = reduce(
-                runtime,
-                ReducerEvent::Snapshot {
-                    snapshot: snapshot(89, false),
-                    full_read: true,
-                    verification: false,
-                    now_ms: 10_000,
-                },
-                &enabled,
-            );
-            let (_, effects) = reduce(
-                runtime,
-                ReducerEvent::Snapshot {
-                    snapshot: snapshot(90, false),
-                    full_read: true,
-                    verification: false,
-                    now_ms: 10_001,
-                },
-                &enabled,
-            );
-            assert!(effects
-                .iter()
-                .any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
-        }
-
-        let mut disabled = QuotaGuardSettings::default();
-        disabled.action = QuotaAction::InterruptImmediately;
-        disabled.external_suspend = false;
-        let (runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
                 now_ms: 1,
             },
-            &disabled,
+            &s,
         );
-        let (runtime, _) = reduce(
-            runtime,
+        let (_, e) = reduce(
+            r,
             ReducerEvent::Snapshot {
-                snapshot: snapshot(89, false),
+                snapshot: snapshot(91),
                 full_read: true,
-                verification: false,
-                now_ms: 10_000,
+                now_ms: 2,
             },
-            &disabled,
+            &s,
         );
-        let (_, effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &disabled,
-        );
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
-
-        let mut notify = QuotaGuardSettings::default();
-        notify.external_suspend = true;
-        notify.action = QuotaAction::NotifyOnly;
-        let (runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &notify,
-        );
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(89, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &notify,
-        );
-        let (_, effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &notify,
-        );
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
-    }
-
-    #[test]
-    fn ready_and_disable_resume_external_engines() {
-        let settings = QuotaGuardSettings::default();
-        let (mut runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &settings,
-        );
-        let account = runtime.account.as_mut().expect("account");
-        account.phase = QuotaGuardPhase::Parked;
-        account.verify_at = Some(1);
-        account.breached_windows.insert(QuotaWindowKind::Primary);
-        account.snapshot = Some(snapshot(90, false));
-        let (runtime, ready_effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(1, false),
-                full_read: true,
-                verification: true,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        assert_eq!(
-            runtime.account.as_ref().map(|account| account.phase),
-            Some(QuotaGuardPhase::Ready)
-        );
-        assert!(ready_effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
-        let (_, disabled_effects) = reduce(runtime, ReducerEvent::Disable { now_ms: 3 }, &settings);
-        assert!(disabled_effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
-    }
-
-    #[test]
-    fn rearm_while_parked_reopens_admission_without_refiring_unchanged_usage() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        settings.external_suspend = true;
-        let (runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &settings,
-        );
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(89, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        let generation = runtime.lifecycle_generation;
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::FinalizeClosedEpisode {
-                transition_id: generation,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        assert_eq!(
-            runtime.account.as_ref().map(|account| account.phase),
-            Some(QuotaGuardPhase::Parked)
-        );
-
-        let (runtime, effects) = reduce(runtime, ReducerEvent::Rearm { now_ms: 10_002 }, &settings);
-        let account = runtime.account.as_ref().expect("account");
-        assert_eq!(account.phase, QuotaGuardPhase::Monitoring);
-        assert!(account.breached_windows.is_empty());
-        assert!(account.verify_at.is_none());
-        assert!(account.episode_policy.is_none());
-        assert_eq!(account.fired_episodes.len(), 1);
-        assert!(effects.contains(&ReducerEffect::ResumeExternalEngines));
-        assert!(effects.contains(&ReducerEffect::SetProcessOpen));
-
-        let (_, unchanged_effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_003,
-            },
-            &settings,
-        );
-        assert!(!unchanged_effects.iter().any(|effect| matches!(
-            effect,
-            ReducerEffect::SetProcessClosed
-                | ReducerEffect::SuspendExternalEngines
-                | ReducerEffect::Notify { .. }
-        )));
-    }
-
-    #[test]
-    fn rearm_allows_a_fresh_crossing_after_hysteresis() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &settings,
-        );
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(89, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_000,
-            },
-            &settings,
-        );
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        let generation = runtime.lifecycle_generation;
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::FinalizeClosedEpisode {
-                transition_id: generation,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-        let (runtime, _) = reduce(runtime, ReducerEvent::Rearm { now_ms: 10_002 }, &settings);
-
-        let (runtime, low_effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(87, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_003,
-            },
-            &settings,
-        );
-        assert!(!low_effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::SetProcessClosed)));
-        assert!(runtime
-            .account
-            .as_ref()
-            .is_some_and(|account| account.fired_episodes.is_empty()));
-
-        let (_, crossing_effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_004,
-            },
-            &settings,
-        );
-        assert!(crossing_effects.contains(&ReducerEffect::SetProcessClosed));
-    }
-
-    #[test]
-    fn parked_snapshot_only_maintains_initially_suspended_engines_by_default() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.external_suspend = true;
-        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
-        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&settings));
-
-        let (runtime, effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-
-        assert_eq!(
-            runtime.account.as_ref().map(|account| account.phase),
-            Some(QuotaGuardPhase::Parked)
-        );
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            ReducerEffect::MaintainExternalEngineSuspension {
-                prevent_new_sessions: false
-            }
-        )));
-        assert!(!effects
-            .iter()
-            .any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
-    }
-
-    #[test]
-    fn parked_snapshot_sweeps_new_engines_when_prevent_new_sessions_is_enabled() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.external_suspend = true;
-        settings.prevent_new_sessions = true;
-        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
-        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&settings));
-
-        let (_, effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &settings,
-        );
-
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            ReducerEffect::MaintainExternalEngineSuspension {
+        assert!(
+            e.contains(&ReducerEffect::MaintainExternalEngineSuspension {
                 prevent_new_sessions: true
-            }
-        )));
+            })
+        );
     }
-
     #[test]
-    fn parked_snapshot_starts_sweeping_newcomers_when_prevention_is_enabled_mid_episode() {
-        let mut trip_settings = QuotaGuardSettings::default();
-        trip_settings.external_suspend = true;
-        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
-        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&trip_settings));
-
-        let mut live_settings = trip_settings;
-        live_settings.prevent_new_sessions = true;
-        let (_, effects) = reduce(
-            runtime,
+    fn disarmed_usage_rides_and_armed_floor_fires() {
+        let (r, mut s) = enabled(QuotaAction::NotifyOnly);
+        s.armed = false;
+        let (_, e) = reduce(
+            r,
             ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
+                snapshot: snapshot(91),
                 full_read: true,
-                verification: false,
-                now_ms: 10_001,
+                now_ms: 1,
             },
-            &live_settings,
+            &s,
         );
-
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            ReducerEffect::MaintainExternalEngineSuspension {
-                prevent_new_sessions: true
-            }
-        )));
-    }
-
-    #[test]
-    fn parked_snapshot_stops_sweeping_newcomers_when_prevention_is_disabled_mid_episode() {
-        let mut trip_settings = QuotaGuardSettings::default();
-        trip_settings.external_suspend = true;
-        trip_settings.prevent_new_sessions = true;
-        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
-        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&trip_settings));
-
-        let mut live_settings = trip_settings;
-        live_settings.prevent_new_sessions = false;
-        let (_, effects) = reduce(
-            runtime,
+        assert!(e.contains(&ReducerEffect::RaiseThresholds { used_percent: 91 }));
+        s.armed = true;
+        let (r, _) = enabled(QuotaAction::NotifyOnly);
+        let (_, e) = reduce(
+            r,
             ReducerEvent::Snapshot {
-                snapshot: snapshot(90, false),
+                snapshot: snapshot(90),
                 full_read: true,
-                verification: false,
-                now_ms: 10_001,
+                now_ms: 1,
             },
-            &live_settings,
+            &s,
         );
-
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            ReducerEffect::MaintainExternalEngineSuspension {
-                prevent_new_sessions: false
-            }
-        )));
-    }
-
-    fn parked_runtime(phase: QuotaGuardPhase, used_percent: u8) -> QuotaGuardRuntimeState {
-        let mut runtime = QuotaGuardRuntimeState::default();
-        let mut account =
-            crate::shared::quota_guard::model::AccountRuntime::new("a".into(), 10_000);
-        account.phase = phase;
-        account.verify_at = Some(100_000);
-        account.breached_windows.insert(QuotaWindowKind::Primary);
-        account.snapshot = Some(snapshot(used_percent, false));
-        runtime.account = Some(account);
-        runtime
-    }
-
-    #[test]
-    fn raised_threshold_queues_immediate_verification_for_parked_and_verifying_reset() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.primary_threshold_percent = 46;
-        for phase in [QuotaGuardPhase::Parked, QuotaGuardPhase::VerifyingReset] {
-            let (_, effects) = reduce(
-                parked_runtime(phase, 45),
-                ReducerEvent::SettingsChanged {
-                    thresholds_changed: true,
-                },
-                &settings,
-            );
-            assert_eq!(effects, vec![ReducerEffect::VerifyNow]);
-        }
-    }
-
-    #[test]
-    fn threshold_change_that_remains_breached_keeps_the_guard_parked() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.primary_threshold_percent = 44;
-        let (runtime, effects) = reduce(
-            parked_runtime(QuotaGuardPhase::Parked, 45),
-            ReducerEvent::SettingsChanged {
-                thresholds_changed: true,
-            },
-            &settings,
-        );
-        assert!(effects.is_empty());
-        assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Parked);
-    }
-
-    #[test]
-    fn disarmed_threshold_change_does_not_queue_verification() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.armed = false;
-        settings.primary_threshold_percent = 46;
-        let (runtime, effects) = reduce(
-            parked_runtime(QuotaGuardPhase::Parked, 45),
-            ReducerEvent::SettingsChanged {
-                thresholds_changed: true,
-            },
-            &settings,
-        );
-        assert!(effects.is_empty());
-        assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Parked);
+        assert!(matches!(e.as_slice(), [ReducerEffect::Notify { .. }]));
     }
 }

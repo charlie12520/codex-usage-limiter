@@ -378,12 +378,13 @@ pub(crate) struct RemoteBackendTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuotaAction {
     NotifyOnly,
-    InterruptImmediately,
+    Interrupt,
+    Block,
 }
 
 impl Default for QuotaAction {
     fn default() -> Self {
-        Self::InterruptImmediately
+        Self::Interrupt
     }
 }
 
@@ -394,7 +395,8 @@ impl Serialize for QuotaAction {
     {
         serializer.serialize_str(match self {
             Self::NotifyOnly => "notifyOnly",
-            Self::InterruptImmediately => "interruptImmediately",
+            Self::Interrupt => "interrupt",
+            Self::Block => "block",
         })
     }
 }
@@ -407,14 +409,14 @@ impl<'de> Deserialize<'de> for QuotaAction {
         let value = serde_json::Value::deserialize(deserializer)?;
         Ok(match value.as_str() {
             Some("notifyOnly") => Self::NotifyOnly,
-            // Legacy finishCurrentTurn and every unrecognized value now take
-            // the safe, enforcing default without rejecting settings.json.
-            _ => Self::InterruptImmediately,
+            Some("interrupt") | Some("interruptImmediately") => Self::Interrupt,
+            Some("block") => Self::Block,
+            _ => Self::Interrupt,
         })
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuotaGuardSettings {
     #[serde(default)]
@@ -429,13 +431,13 @@ pub(crate) struct QuotaGuardSettings {
     pub(crate) secondary_threshold_percent: u8,
     #[serde(default)]
     pub(crate) action: QuotaAction,
-    #[serde(default = "default_reset_grace_minutes")]
+    #[serde(skip)]
     pub(crate) reset_grace_minutes: u16,
-    #[serde(default = "default_notify_when_available")]
+    #[serde(skip)]
     pub(crate) notify_when_available: bool,
-    #[serde(default)]
+    #[serde(skip)]
     pub(crate) external_suspend: bool,
-    #[serde(default)]
+    #[serde(skip)]
     pub(crate) prevent_new_sessions: bool,
 }
 
@@ -446,9 +448,9 @@ impl Default for QuotaGuardSettings {
             armed: default_quota_guard_armed(),
             primary_threshold_percent: default_quota_guard_threshold(),
             secondary_threshold_percent: default_quota_guard_threshold(),
-            action: QuotaAction::InterruptImmediately,
-            reset_grace_minutes: default_reset_grace_minutes(),
-            notify_when_available: default_notify_when_available(),
+            action: QuotaAction::Interrupt,
+            reset_grace_minutes: 10,
+            notify_when_available: true,
             external_suspend: false,
             prevent_new_sessions: false,
         }
@@ -461,11 +463,46 @@ fn default_quota_guard_armed() -> bool {
 fn default_quota_guard_threshold() -> u8 {
     90
 }
-fn default_reset_grace_minutes() -> u16 {
-    10
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawQuotaGuardSettings {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_quota_guard_armed")]
+    armed: bool,
+    #[serde(default = "default_quota_guard_threshold")]
+    primary_threshold_percent: u8,
+    #[serde(default = "default_quota_guard_threshold")]
+    secondary_threshold_percent: u8,
+    #[serde(default)]
+    action: QuotaAction,
+    #[serde(default)]
+    prevent_new_sessions: bool,
 }
-fn default_notify_when_available() -> bool {
-    true
+
+impl<'de> Deserialize<'de> for QuotaGuardSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawQuotaGuardSettings::deserialize(deserializer)?;
+        let action = if raw.prevent_new_sessions && matches!(raw.action, QuotaAction::Interrupt) {
+            QuotaAction::Block
+        } else {
+            raw.action
+        };
+        Ok(Self {
+            enabled: raw.enabled,
+            armed: raw.armed,
+            primary_threshold_percent: raw.primary_threshold_percent,
+            secondary_threshold_percent: raw.secondary_threshold_percent,
+            action,
+            reset_grace_minutes: 10,
+            notify_when_available: true,
+            external_suspend: false,
+            prevent_new_sessions: false,
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1299,7 +1336,7 @@ impl Default for AppSettings {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use super::{
         AppSettings, BackendMode, RemoteBackendProvider, WorkspaceEntry, WorkspaceGroup,

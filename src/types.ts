@@ -238,7 +238,8 @@ export type OpenAppTarget = {
 
 export type QuotaAction =
   | "notifyOnly"
-  | "interruptImmediately";
+  | "interrupt"
+  | "block";
 
 export type QuotaGuardSettings = {
   enabled: boolean;
@@ -247,10 +248,6 @@ export type QuotaGuardSettings = {
   primaryThresholdPercent: number;
   secondaryThresholdPercent: number;
   action: QuotaAction;
-  resetGraceMinutes: number;
-  notifyWhenAvailable: boolean;
-  externalSuspend?: boolean;
-  preventNewSessions?: boolean;
 };
 
 export type AppSettings = {
