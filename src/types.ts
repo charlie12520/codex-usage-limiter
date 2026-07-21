@@ -255,6 +255,7 @@ export type QuotaGuardSettings = {
   resetGraceMinutes: number;
   notifyWhenAvailable: boolean;
   externalSuspend?: boolean;
+  preventNewSessions?: boolean;
 };
 
 export type AppSettings = {

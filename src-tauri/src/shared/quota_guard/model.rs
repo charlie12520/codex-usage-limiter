@@ -83,6 +83,8 @@ pub(crate) struct EpisodePolicy {
     pub(crate) action: QuotaAction,
     #[serde(default)]
     pub(crate) external_suspend: bool,
+    #[serde(default)]
+    pub(crate) prevent_new_sessions: bool,
     pub(crate) drain_timeout_minutes: u16,
     pub(crate) drain_timeout_action: DrainTimeoutAction,
     pub(crate) reset_grace_minutes: u16,

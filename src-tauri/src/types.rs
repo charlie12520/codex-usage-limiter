@@ -427,6 +427,8 @@ pub(crate) struct QuotaGuardSettings {
     pub(crate) notify_when_available: bool,
     #[serde(default)]
     pub(crate) external_suspend: bool,
+    #[serde(default)]
+    pub(crate) prevent_new_sessions: bool,
 }
 
 impl Default for QuotaGuardSettings {
@@ -442,6 +444,7 @@ impl Default for QuotaGuardSettings {
             reset_grace_minutes: default_reset_grace_minutes(),
             notify_when_available: default_notify_when_available(),
             external_suspend: false,
+            prevent_new_sessions: false,
         }
     }
 }
@@ -1300,6 +1303,7 @@ mod tests {
         assert_eq!(settings.quota_guard.drain_timeout_minutes, 15);
         assert_eq!(settings.quota_guard.reset_grace_minutes, 10);
         assert!(settings.quota_guard.notify_when_available);
+        assert!(!settings.quota_guard.prevent_new_sessions);
         let expected_backend_mode = if cfg!(target_os = "ios") {
             BackendMode::Remote
         } else {
@@ -1510,6 +1514,7 @@ mod tests {
         assert_eq!(guard.get("secondaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
         assert_eq!(guard.get("action").and_then(serde_json::Value::as_str), Some("notifyOnly"));
         assert_eq!(guard.get("drainTimeoutAction").and_then(serde_json::Value::as_str), Some("notifyAndHold"));
+        assert_eq!(guard.get("preventNewSessions").and_then(serde_json::Value::as_bool), Some(false));
         assert!(!guard.contains_key("primary_threshold_percent"));
     }
 }

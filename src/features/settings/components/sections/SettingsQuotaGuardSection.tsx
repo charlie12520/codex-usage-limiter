@@ -104,6 +104,16 @@ export function SettingsQuotaGuardSection({ appSettings, onUpdateAppSettings }: 
           onClick={() => update({ externalSuspend: quotaGuard.externalSuspend !== true })}
         />
       </SettingsToggleRow>
+      <SettingsToggleRow
+        title="Prevent new sessions while under the limit"
+        subtitle="While the floor is breached, also freeze Codex engines launched after the trip."
+      >
+        <SettingsToggleSwitch
+          pressed={quotaGuard.preventNewSessions === true}
+          disabled={remoteIncompatible}
+          onClick={() => update({ preventNewSessions: quotaGuard.preventNewSessions !== true })}
+        />
+      </SettingsToggleRow>
       <div className="settings-help">
         Freezing does not cancel a reply already generating server-side — an in-flight turn may still complete and count toward usage. Only new turns are prevented.
       </div>

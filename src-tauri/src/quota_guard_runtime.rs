@@ -267,6 +267,9 @@ async fn apply_effective_settings_changed(handle: &QuotaGuardHandle, app: &AppHa
     if (change.previous.external_suspend && !change.updated.external_suspend)
         || (change.previous.armed && !change.updated.armed) {
         resume_external_engines(handle, path).await?;
+        // The episode policy is durable so later blocked snapshots cannot
+        // refreeze a process that was just intentionally resumed.
+        disable_external_suspension_for_active_episode(handle, path).await?;
     }
     if !change.updated.enabled {
         apply_event(handle, app, path, bindings, ReducerEvent::Disable { now_ms: now_ms() }).await?;
@@ -568,7 +571,8 @@ fn enqueue_finalization_after_admissions(handle: &QuotaGuardHandle, generation: 
 async fn run_effect(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, effect: ReducerEffect) -> Result<(), String> {
     match effect {
         ReducerEffect::SetProcessClosed => handle.inner.gate.close(),
-        ReducerEffect::SuspendExternalEngines => suspend_external_engines(handle, app, path).await?,
+        ReducerEffect::SuspendExternalEngines => suspend_external_engines(handle, app, path, true).await?,
+        ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions } => suspend_external_engines(handle, app, path, prevent_new_sessions).await?,
         ReducerEffect::ResumeExternalEngines => resume_external_engines(handle, path).await?,
         ReducerEffect::SetProcessOpen => {
             handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
@@ -788,13 +792,19 @@ async fn push_external_activity(handle: &QuotaGuardHandle, path: &PathBuf, kind:
     persist_current(handle, path).await
 }
 
-async fn suspend_external_engines(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf) -> Result<(), String> {
+async fn suspend_external_engines(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, prevent_new_sessions: bool) -> Result<(), String> {
     let prior = handle.runtime().await.account.map(|account| account.suspended_external_engines).unwrap_or_default();
-    let known = prior.iter().map(|entry| (entry.pid, entry.process_start_time)).collect::<HashSet<_>>();
-    let result = external_suspend::sweep(owned_session_pids(app).await, &known, now_ms());
-    if !result.suspended.is_empty() {
+    let (live, stale) = external_suspend::live_entries(&prior);
+    let known = live.iter().map(|entry| (entry.pid, entry.process_start_time)).collect::<HashSet<_>>();
+    let result = if prevent_new_sessions {
+        external_suspend::sweep(owned_session_pids(app).await, &known, now_ms())
+    } else {
+        external_suspend::SweepResult::default()
+    };
+    if live != prior || !result.suspended.is_empty() {
         let mut runtime = handle.inner.runtime.lock().await;
         if let Some(account) = runtime.account.as_mut() {
+            account.suspended_external_engines = live;
             for engine in &result.suspended {
                 if !account.suspended_external_engines.iter().any(|entry| entry.pid == engine.pid && entry.process_start_time == engine.process_start_time) {
                     account.suspended_external_engines.push(engine.clone());
@@ -804,6 +814,7 @@ async fn suspend_external_engines(handle: &QuotaGuardHandle, app: &AppHandle, pa
         drop(runtime);
         persist_current(handle, path).await?;
     }
+    push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSkipped, stale).await?;
     push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSuspended,
         result.suspended.iter().map(|engine| format!("suspended {} ({})", engine.image_path, engine.pid)).collect()).await?;
     push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSkipped, result.skipped).await
@@ -831,6 +842,16 @@ async fn resume_external_engines(handle: &QuotaGuardHandle, path: &PathBuf) -> R
     let mut skipped = stale;
     skipped.extend(result.skipped);
     push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSkipped, skipped).await
+}
+
+async fn disable_external_suspension_for_active_episode(handle: &QuotaGuardHandle, path: &PathBuf) -> Result<(), String> {
+    let mut runtime = handle.inner.runtime.lock().await;
+    let Some(policy) = runtime.account.as_mut().and_then(|account| account.episode_policy.as_mut()) else { return Ok(()); };
+    if !policy.external_suspend && !policy.prevent_new_sessions { return Ok(()); }
+    policy.external_suspend = false;
+    policy.prevent_new_sessions = false;
+    drop(runtime);
+    persist_current(handle, path).await
 }
 
 async fn reconcile_startup_external_engines(handle: &QuotaGuardHandle, path: &PathBuf) -> Result<(), String> {

@@ -8,7 +8,11 @@ use super::parser::is_usage_limit_exceeded;
 pub(crate) enum ReducerEffect {
     SetProcessClosed,
     SetProcessOpen,
+    /// Runs only when an enforcing episode first freezes external engines.
     SuspendExternalEngines,
+    /// Revalidates engines frozen by the initial sweep. New engines are
+    /// discovered only when the episode explicitly opted into that policy.
+    MaintainExternalEngineSuspension { prevent_new_sessions: bool },
     ResumeExternalEngines,
     Notify { episode: EpisodeKey },
     FinalizeClosedEpisode { transition_id: u64 },
@@ -58,7 +62,7 @@ pub(crate) enum ReducerEvent {
 }
 
 fn policy(settings: &QuotaGuardSettings) -> EpisodePolicy {
-    EpisodePolicy { action: settings.action, external_suspend: settings.external_suspend, drain_timeout_minutes: settings.drain_timeout_minutes, drain_timeout_action: settings.drain_timeout_action, reset_grace_minutes: settings.reset_grace_minutes }
+    EpisodePolicy { action: settings.action, external_suspend: settings.external_suspend, prevent_new_sessions: settings.prevent_new_sessions, drain_timeout_minutes: settings.drain_timeout_minutes, drain_timeout_action: settings.drain_timeout_action, reset_grace_minutes: settings.reset_grace_minutes }
 }
 
 fn increment_generation(runtime: &mut QuotaGuardRuntimeState) -> bool {
@@ -90,7 +94,9 @@ fn finish_if_empty(account: &mut AccountRuntime, generation: u64, now_ms: i64, e
     if empty {
         match parked_verification_effect(account, generation) {
             Ok(effect) => {
-                if account.episode_policy.as_ref().is_some_and(|policy| policy.external_suspend) {
+                if account.episode_policy.as_ref().is_some_and(|policy| policy.external_suspend && policy.action == QuotaAction::FinishCurrentTurn) {
+                    // Interrupt-immediately freezes at the trip itself. A second broad
+                    // sweep while moving into Parked could catch a later engine.
                     effects.push(ReducerEffect::SuspendExternalEngines);
                 }
                 effects.push(effect);
@@ -459,8 +465,9 @@ pub(crate) fn reduce(mut runtime: QuotaGuardRuntimeState, event: ReducerEvent, s
             let prior = account.snapshot.clone();
             let prior_breaches = account.breached_windows.clone();
             let parked_or_verifying = matches!(account.phase, QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset);
-            let resweep_external = matches!(account.phase, QuotaGuardPhase::Closing | QuotaGuardPhase::Interrupting | QuotaGuardPhase::AwaitingDrainDecision | QuotaGuardPhase::Draining | QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset)
+            let maintain_external_suspension = matches!(account.phase, QuotaGuardPhase::Closing | QuotaGuardPhase::Interrupting | QuotaGuardPhase::AwaitingDrainDecision | QuotaGuardPhase::Draining | QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset)
                 && account.episode_policy.as_ref().is_some_and(|policy| policy.external_suspend);
+            let prevent_new_sessions = account.episode_policy.as_ref().is_some_and(|policy| policy.prevent_new_sessions);
             let verification_due = account.verify_at.is_some_and(|verify_at| now_ms >= verify_at);
             let evaluation = evaluate_snapshot(&account.account_key, &snapshot, prior.as_ref(), settings, &account.fired_episodes, full_read);
             let retain_hard_limit = matches!(
@@ -491,10 +498,10 @@ pub(crate) fn reduce(mut runtime: QuotaGuardRuntimeState, event: ReducerEvent, s
             } else {
                 account.last_error = None;
             }
-            // Polls continue while an enforcing episode is blocked so engines
-            // launched after the initial suspension sweep are caught too.
-            if resweep_external {
-                effects.push(ReducerEffect::SuspendExternalEngines);
+            // Keep original frozen identities current. Discovering engines that
+            // appeared after the trip is opt-in rather than the default.
+            if maintain_external_suspension {
+                effects.push(ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions });
             }
             if parked_or_verifying && full_read {
                 if !verification_due && !verification {
@@ -1046,23 +1053,28 @@ mod tests {
     }
 
     #[test]
-    fn external_suspend_only_emits_for_enforcing_armed_episodes() {
-        let mut enabled = QuotaGuardSettings::default();
-        enabled.action = QuotaAction::InterruptImmediately;
-        enabled.external_suspend = true;
-        let (runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &enabled);
-        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(89, false), full_read: true, verification: false, now_ms: 10_000 }, &enabled);
-        let (_, effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001 }, &enabled);
-        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
+    fn external_suspend_initial_fire_sweeps_in_both_newcomer_modes() {
+        for prevent_new_sessions in [false, true] {
+            let mut enabled = QuotaGuardSettings::default();
+            enabled.action = QuotaAction::InterruptImmediately;
+            enabled.external_suspend = true;
+            enabled.prevent_new_sessions = prevent_new_sessions;
+            let (runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &enabled);
+            let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(89, false), full_read: true, verification: false, now_ms: 10_000 }, &enabled);
+            let (_, effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001 }, &enabled);
+            assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
+        }
 
-        let mut disabled = enabled.clone();
+        let mut disabled = QuotaGuardSettings::default();
+        disabled.action = QuotaAction::InterruptImmediately;
         disabled.external_suspend = false;
         let (runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &disabled);
         let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(89, false), full_read: true, verification: false, now_ms: 10_000 }, &disabled);
         let (_, effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001 }, &disabled);
         assert!(!effects.iter().any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
 
-        let mut notify = enabled;
+        let mut notify = QuotaGuardSettings::default();
+        notify.external_suspend = true;
         notify.action = QuotaAction::NotifyOnly;
         let (runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &notify);
         let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: snapshot(89, false), full_read: true, verification: false, now_ms: 10_000 }, &notify);
@@ -1137,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn parked_snapshot_resweeps_external_engines_before_verification_is_due() {
+    fn parked_snapshot_only_maintains_initially_suspended_engines_by_default() {
         let mut settings = QuotaGuardSettings::default();
         settings.external_suspend = true;
         let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
@@ -1155,7 +1167,23 @@ mod tests {
         );
 
         assert_eq!(runtime.account.as_ref().map(|account| account.phase), Some(QuotaGuardPhase::Parked));
-        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions: false })));
+        assert!(!effects.iter().any(|effect| matches!(effect, ReducerEffect::SuspendExternalEngines)));
+    }
+
+    #[test]
+    fn parked_snapshot_sweeps_new_engines_when_prevent_new_sessions_is_enabled() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.external_suspend = true;
+        settings.prevent_new_sessions = true;
+        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
+        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&settings));
+
+        let (_, effects) = reduce(runtime, ReducerEvent::Snapshot {
+            snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001,
+        }, &settings);
+
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions: true })));
     }
 
     fn parked_runtime(phase: QuotaGuardPhase, used_percent: u8) -> QuotaGuardRuntimeState {

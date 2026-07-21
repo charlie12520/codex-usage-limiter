@@ -45,6 +45,7 @@ describe("useAppSettings", () => {
       resetGraceMinutes: 10,
       notifyWhenAvailable: true,
       externalSuspend: false,
+      preventNewSessions: false,
     });
     expect(
       normalizeAppSettings({ ...defaults, quotaGuard: undefined as never }).quotaGuard,
