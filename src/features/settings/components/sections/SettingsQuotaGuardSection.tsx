@@ -104,6 +104,9 @@ export function SettingsQuotaGuardSection({ appSettings, onUpdateAppSettings }: 
           onClick={() => update({ externalSuspend: quotaGuard.externalSuspend !== true })}
         />
       </SettingsToggleRow>
+      <div className="settings-help">
+        Freezing does not cancel a reply already generating server-side — an in-flight turn may still complete and count toward usage. Only new turns are prevented.
+      </div>
     </SettingsSection>
   );
 }
