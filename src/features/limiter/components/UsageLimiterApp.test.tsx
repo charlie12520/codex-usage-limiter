@@ -304,7 +304,7 @@ describe("UsageLimiterApp", () => {
     expect((screen.getByRole("checkbox", { name: "Limiter armed" }) as HTMLInputElement).checked).toBe(true);
   });
 
-  it("greys out and locks the threshold grabber while disarmed", async () => {
+  it("greys out the full usage control while keeping the threshold grabber operable when disarmed", async () => {
     vi.mocked(getAppSettings).mockResolvedValue({
       ...appSettings,
       quotaGuard: { ...appSettings.quotaGuard, armed: false },
@@ -312,9 +312,42 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
+    const progress = screen.getByRole("progressbar", { name: "Current Codex usage" });
+    const fill = progress.querySelector(".limiter-progress__fill");
     const handle = screen.getByRole("slider", { name: "Trigger threshold" });
+
+    expect(progress.className).toContain("is-disarmed");
+    expect(fill?.className).toContain("limiter-progress__fill");
     expect(handle.className).toContain("is-disarmed");
-    expect(handle.getAttribute("aria-disabled")).toBe("true");
-    expect(handle.getAttribute("tabindex")).toBe("-1");
+    expect(handle.getAttribute("aria-disabled")).toBe("false");
+    expect(handle.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("persists a threshold drag while disarmed", async () => {
+    vi.mocked(getAppSettings).mockResolvedValue({
+      ...appSettings,
+      quotaGuard: { ...appSettings.quotaGuard, armed: false },
+    });
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+
+    const progress = screen.getByRole("progressbar", { name: "Current Codex usage" });
+    vi.spyOn(progress, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, bottom: 12, right: 200, width: 200, height: 12, toJSON: () => ({}),
+    });
+    const handle = screen.getByRole("slider", { name: "Trigger threshold" });
+    Object.defineProperty(handle, "setPointerCapture", { value: vi.fn() });
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 20 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 50 });
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 50 });
+
+    await waitFor(() => expect(updateAppSettings).toHaveBeenCalledWith(expect.objectContaining({
+      quotaGuard: expect.objectContaining({
+        armed: false,
+        primaryThresholdPercent: 75,
+        secondaryThresholdPercent: 75,
+      }),
+    })));
   });
 });

@@ -431,7 +431,7 @@ export function UsageLimiterApp() {
 
   const usageBar = (
     <div
-      className="limiter-progress"
+      className={`limiter-progress${armed ? "" : " is-disarmed"}`}
       ref={barRef}
       style={barStyle}
       role="progressbar"
@@ -444,9 +444,9 @@ export function UsageLimiterApp() {
       <span
         className={`limiter-progress__handle${armed ? "" : " is-disarmed"}`}
         role="slider"
-        tabIndex={armed ? 0 : -1}
+        tabIndex={0}
         aria-label="Trigger threshold"
-        aria-disabled={!armed}
+        aria-disabled={false}
         aria-valuemin={1}
         aria-valuemax={99}
         aria-valuenow={floor}

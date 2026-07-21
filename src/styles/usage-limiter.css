@@ -387,6 +387,13 @@ select:disabled {
   background: var(--track);
 }
 
+/* Disarming stops responses, not monitoring or threshold editing. Keep the
+   usage amount visible, but make the whole control read as inert. */
+.limiter-progress.is-disarmed {
+  border-color: var(--border);
+  background: var(--surface-soft);
+}
+
 .limiter-progress__fill {
   position: absolute;
   inset: 0 auto 0 0;
@@ -397,6 +404,11 @@ select:disabled {
 
 .limiter-progress__fill.is-over {
   background: var(--danger);
+}
+
+.limiter-progress.is-disarmed .limiter-progress__fill,
+.limiter-progress.is-disarmed .limiter-progress__fill.is-over {
+  background: var(--border-strong);
 }
 
 .limiter-progress__handle {
@@ -415,14 +427,9 @@ select:disabled {
   cursor: grabbing;
 }
 
-.limiter-progress__handle.is-disarmed {
-  pointer-events: none;
-  cursor: default;
-}
-
 .limiter-progress__handle.is-disarmed .limiter-progress__knob,
 .limiter-progress__handle.is-disarmed small {
-  opacity: 0.4;
+  opacity: 0.72;
 }
 
 .limiter-progress__knob {
@@ -458,6 +465,21 @@ select:disabled {
   color: var(--muted);
   white-space: nowrap;
   pointer-events: none;
+}
+
+.limiter-progress.is-disarmed .limiter-progress__knob {
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+  box-shadow: none;
+}
+
+.limiter-progress.is-disarmed .limiter-progress__knob::before,
+.limiter-progress.is-disarmed .limiter-progress__knob::after {
+  background: var(--muted);
+}
+
+.limiter-progress.is-disarmed .limiter-progress__handle small {
+  color: var(--muted);
 }
 
 /* ---------- Compact mode ---------- */
