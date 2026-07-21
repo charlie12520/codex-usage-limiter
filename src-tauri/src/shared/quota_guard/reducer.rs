@@ -467,7 +467,11 @@ pub(crate) fn reduce(mut runtime: QuotaGuardRuntimeState, event: ReducerEvent, s
             let parked_or_verifying = matches!(account.phase, QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset);
             let maintain_external_suspension = matches!(account.phase, QuotaGuardPhase::Closing | QuotaGuardPhase::Interrupting | QuotaGuardPhase::AwaitingDrainDecision | QuotaGuardPhase::Draining | QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset)
                 && account.episode_policy.as_ref().is_some_and(|policy| policy.external_suspend);
-            let prevent_new_sessions = account.episode_policy.as_ref().is_some_and(|policy| policy.prevent_new_sessions);
+            // External suspension itself is an episode-level promise, but
+            // newcomer sweeping is a live operator preference. This lets an
+            // in-force parked episode start or stop sweeping on its next poll
+            // without changing which engines were frozen at the trip.
+            let prevent_new_sessions = settings.prevent_new_sessions;
             let verification_due = account.verify_at.is_some_and(|verify_at| now_ms >= verify_at);
             let evaluation = evaluate_snapshot(&account.account_key, &snapshot, prior.as_ref(), settings, &account.fired_episodes, full_read);
             let retain_hard_limit = matches!(
@@ -1184,6 +1188,39 @@ mod tests {
         }, &settings);
 
         assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions: true })));
+    }
+
+    #[test]
+    fn parked_snapshot_starts_sweeping_newcomers_when_prevention_is_enabled_mid_episode() {
+        let mut trip_settings = QuotaGuardSettings::default();
+        trip_settings.external_suspend = true;
+        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
+        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&trip_settings));
+
+        let mut live_settings = trip_settings;
+        live_settings.prevent_new_sessions = true;
+        let (_, effects) = reduce(runtime, ReducerEvent::Snapshot {
+            snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001,
+        }, &live_settings);
+
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions: true })));
+    }
+
+    #[test]
+    fn parked_snapshot_stops_sweeping_newcomers_when_prevention_is_disabled_mid_episode() {
+        let mut trip_settings = QuotaGuardSettings::default();
+        trip_settings.external_suspend = true;
+        trip_settings.prevent_new_sessions = true;
+        let mut runtime = parked_runtime(QuotaGuardPhase::Parked, 90);
+        runtime.account.as_mut().expect("account").episode_policy = Some(policy(&trip_settings));
+
+        let mut live_settings = trip_settings;
+        live_settings.prevent_new_sessions = false;
+        let (_, effects) = reduce(runtime, ReducerEvent::Snapshot {
+            snapshot: snapshot(90, false), full_read: true, verification: false, now_ms: 10_001,
+        }, &live_settings);
+
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::MaintainExternalEngineSuspension { prevent_new_sessions: false })));
     }
 
     fn parked_runtime(phase: QuotaGuardPhase, used_percent: u8) -> QuotaGuardRuntimeState {
