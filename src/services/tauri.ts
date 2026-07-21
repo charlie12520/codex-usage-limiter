@@ -881,6 +881,10 @@ export async function setTrayUsageTooltip(tooltip: string): Promise<void> {
   return invoke("set_tray_usage_tooltip", { tooltip });
 }
 
+export async function setTrayTheme(theme: "light" | "dark"): Promise<void> {
+  return invoke("set_tray_theme", { theme });
+}
+
 export async function getAutostart(): Promise<boolean> {
   return invoke<boolean>("get_autostart");
 }

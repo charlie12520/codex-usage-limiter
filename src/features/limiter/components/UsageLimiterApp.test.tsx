@@ -187,7 +187,7 @@ describe("UsageLimiterApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(screen.getByRole("heading", { name: "Limit" })).toBeTruthy();
-    expect(screen.getByText("Type a number to turn this on; clear it to turn it off.")).toBeTruthy();
+    expect(screen.queryByText("Type a number to turn this on; clear it to turn it off.")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.click(screen.getByRole("button", { name: "Dark" }));

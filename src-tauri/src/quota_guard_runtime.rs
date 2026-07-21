@@ -618,10 +618,7 @@ async fn synchronize_gate_with_runtime(
         .account
         .as_ref()
         .map(|account| account.phase);
-    if matches!(
-        phase,
-        Some(QuotaGuardPhase::Monitoring)
-    ) {
+    if matches!(phase, Some(QuotaGuardPhase::Monitoring)) {
         handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
         for (workspace_id, (epoch, _)) in bindings {
             handle.inner.gate.set_epoch_open(epoch, workspace_id, true);
@@ -1622,10 +1619,7 @@ async fn handle_command(
 }
 
 fn external_suspension_phase(phase: QuotaGuardPhase) -> bool {
-    matches!(
-        phase,
-        QuotaGuardPhase::Tripped
-    )
+    matches!(phase, QuotaGuardPhase::Tripped)
 }
 
 async fn owned_session_pids(app: &AppHandle) -> HashSet<u32> {
@@ -2030,7 +2024,19 @@ async fn emit_state(app: &AppHandle, handle: &QuotaGuardHandle) {
         .cloned()
         .collect();
     handle.set_configured_workspaces(workspace_ids).await;
-    let _ = app.emit("quota-guard-state-changed", handle.public_state().await);
+    let public_state = handle.public_state().await;
+    crate::limiter_shell::set_tray_guard_tripped(
+        app,
+        matches!(
+            public_state.phase,
+            QuotaGuardPhase::Tripped | QuotaGuardPhase::InterventionRequired
+        ) || !public_state.suspended_external_engines.is_empty()
+            || public_state
+                .admission_by_workspace
+                .values()
+                .any(|admission| !admission.open),
+    );
+    let _ = app.emit("quota-guard-state-changed", public_state);
 }
 
 fn nested_string(value: &Value, keys: &[&str]) -> Option<String> {

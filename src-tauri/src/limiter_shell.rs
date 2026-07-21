@@ -2,9 +2,24 @@
 //! restore, and start-at-login. Desktop-only features degrade to inert
 //! commands on mobile so the invoke surface stays uniform.
 
-use tauri::AppHandle;
+use std::sync::Mutex;
+
+use tauri::{AppHandle, Manager};
 
 pub(crate) const TRAY_ID: &str = "limiter-tray";
+
+#[derive(Clone, Copy, Default)]
+enum TrayTheme {
+    #[default]
+    Light,
+    Dark,
+}
+
+#[derive(Default)]
+pub(crate) struct TrayAppearanceState {
+    theme: Mutex<TrayTheme>,
+    tripped: Mutex<bool>,
+}
 
 #[cfg(desktop)]
 pub(crate) fn init_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -14,11 +29,8 @@ pub(crate) fn init_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "limiter-show", "Show", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "limiter-quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
-    let mut builder = TrayIconBuilder::with_id(TRAY_ID);
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
-    }
-    builder
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(load_tray_icon(TrayTheme::Light, false)?)
         .tooltip("Codex Usage Limiter")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -39,6 +51,67 @@ pub(crate) fn init_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+#[cfg(desktop)]
+fn load_tray_icon(theme: TrayTheme, tripped: bool) -> tauri::Result<tauri::image::Image<'static>> {
+    let bytes = if tripped {
+        include_bytes!("../icons/tray-icon-gold.png").as_slice()
+    } else {
+        match theme {
+            TrayTheme::Light => include_bytes!("../icons/tray-icon-dark.png").as_slice(),
+            TrayTheme::Dark => include_bytes!("../icons/tray-icon-light.png").as_slice(),
+        }
+    };
+    tauri::image::Image::from_bytes(bytes).map(|image| image.to_owned())
+}
+
+#[cfg(desktop)]
+fn refresh_tray_icon(app: &AppHandle, state: &TrayAppearanceState) {
+    let theme = state.theme.lock().map(|theme| *theme).unwrap_or_default();
+    let tripped = state
+        .tripped
+        .lock()
+        .map(|tripped| *tripped)
+        .unwrap_or(false);
+    if let (Some(tray), Ok(icon)) = (app.tray_by_id(TRAY_ID), load_tray_icon(theme, tripped)) {
+        let _ = tray.set_icon(Some(icon));
+    }
+}
+
+/// Uses the operating-system color-scheme reported by the webview. The gold
+/// tripped icon always wins over this normal-state theme selection.
+#[tauri::command]
+pub(crate) fn set_tray_theme(app: AppHandle, theme: String) {
+    #[cfg(desktop)]
+    {
+        let state = app.state::<TrayAppearanceState>();
+        if let Ok(mut current) = state.theme.lock() {
+            *current = if theme == "dark" {
+                TrayTheme::Dark
+            } else {
+                TrayTheme::Light
+            };
+        }
+        refresh_tray_icon(&app, &state);
+        return;
+    }
+    #[allow(unreachable_code)]
+    let _ = (app, theme);
+}
+
+pub(crate) fn set_tray_guard_tripped(app: &AppHandle, tripped: bool) {
+    #[cfg(desktop)]
+    {
+        let state = app.state::<TrayAppearanceState>();
+        if let Ok(mut current) = state.tripped.lock() {
+            *current = tripped;
+        }
+        refresh_tray_icon(app, &state);
+        return;
+    }
+    #[allow(unreachable_code)]
+    let _ = (app, tripped);
 }
 
 #[cfg(desktop)]
@@ -103,7 +176,9 @@ mod autostart_impl {
         let mut command = std::process::Command::new("reg");
         if enabled {
             let exe = format!("\"{}\"", super::launch_path()?);
-            command.args(["add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &exe, "/f"]);
+            command.args([
+                "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &exe, "/f",
+            ]);
         } else {
             command.args(["delete", RUN_KEY, "/v", VALUE, "/f"]);
         }
@@ -171,15 +246,16 @@ mod autostart_impl {
         let base = std::env::var("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|_| {
-                std::env::var("HOME")
-                    .map(|home| std::path::PathBuf::from(home).join(".config"))
+                std::env::var("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
             })
             .map_err(|error| error.to_string())?;
         Ok(base.join("autostart/codex-usage-limiter.desktop"))
     }
 
     pub(super) fn get() -> bool {
-        desktop_entry_path().map(|path| path.exists()).unwrap_or(false)
+        desktop_entry_path()
+            .map(|path| path.exists())
+            .unwrap_or(false)
     }
 
     pub(super) fn set(enabled: bool) -> Result<(), String> {

@@ -18,6 +18,7 @@ import {
   listWorkspaces,
   pickWorkspacePath,
   setAutostart,
+  setTrayTheme,
   setTrayUsageTooltip,
   updateAppSettings,
 } from "@/services/tauri";
@@ -186,6 +187,15 @@ export function UsageLimiterApp() {
     document.documentElement.dataset.appearance = appearance;
     localStorage.setItem(APPEARANCE_KEY, appearance);
   }, [appearance]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return undefined;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncTrayTheme = () => void setTrayTheme(media.matches ? "dark" : "light").catch(() => undefined);
+    syncTrayTheme();
+    media.addEventListener("change", syncTrayTheme);
+    return () => media.removeEventListener("change", syncTrayTheme);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(WINDOW_MODE_KEY, windowMode);
@@ -665,7 +675,7 @@ export function UsageLimiterApp() {
               <p>{currentAction.description}</p>
               <div className="limiter-rearm-row">
                 <label htmlFor="rearm-after-reset">Rearm after reset at <input id="rearm-after-reset" inputMode="numeric" placeholder="—" value={rearmInput} disabled={busy === "save"} onChange={(event) => changeRearmAfterReset(event.target.value)} />% left</label>
-                <p>{rearmInput === "" ? "Type a number to turn this on; clear it to turn it off." : `When usage resets, the switch arms itself with the trigger at ${clampRemainingFloor(Number(rearmInput))}% left.`}</p>
+                {rearmInput !== "" ? <p>When usage resets, the switch arms itself with the trigger at {clampRemainingFloor(Number(rearmInput))}% left.</p> : null}
               </div>
             </section>
 

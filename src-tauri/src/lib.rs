@@ -102,6 +102,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(menu::MenuItemRegistry::<tauri::Wry>::default())
         .manage(tray::TrayState::default())
+        .manage(limiter_shell::TrayAppearanceState::default())
         .on_menu_event(menu::handle_menu_event)
         .enable_macos_default_menu(false)
         .menu(menu::build_menu);
@@ -214,6 +215,7 @@ pub fn run() {
             tray::set_tray_recent_threads,
             tray::set_tray_session_usage,
             limiter_shell::set_tray_usage_tooltip,
+            limiter_shell::set_tray_theme,
             limiter_shell::get_autostart,
             limiter_shell::set_autostart,
             codex::codex_doctor,
