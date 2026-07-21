@@ -897,14 +897,6 @@ export async function quotaGuardApplyActionNow(): Promise<QuotaGuardPublicState>
   return invoke<QuotaGuardPublicState>("quota_guard_apply_action_now");
 }
 
-export async function quotaGuardKeepWaiting(): Promise<QuotaGuardPublicState> {
-  return invoke<QuotaGuardPublicState>("quota_guard_keep_waiting");
-}
-
-export async function quotaGuardInterruptNow(): Promise<QuotaGuardPublicState> {
-  return invoke<QuotaGuardPublicState>("quota_guard_interrupt_now");
-}
-
 export async function quotaGuardVerifyNow(): Promise<QuotaGuardPublicState> {
   return invoke<QuotaGuardPublicState>("quota_guard_verify_now");
 }

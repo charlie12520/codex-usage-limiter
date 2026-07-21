@@ -815,36 +815,6 @@ fn configured_workspaces_remain_visible_through_disconnect_and_reconnect() {
 }
 
 #[test]
-fn concurrent_settings_change_cannot_rewrite_the_episode_already_closing() {
-    let mut settings = QuotaGuardSettings::default();
-    settings.action = QuotaAction::FinishCurrentTurn;
-    let mut harness = QuotaGuardHarness::new(settings, NOW);
-    harness.dispatch(ReducerEvent::Enable {
-        account_key: "account".into(),
-        now_ms: NOW,
-    });
-    let allowed = turn("pre-threshold-turn");
-    harness.runtime.account.as_mut().expect("account").local_turn_registry = vec![allowed];
-    harness.dispatch(ReducerEvent::Snapshot { snapshot: snapshot(89, 2_000), full_read: true, verification: false, now_ms: NOW });
-    harness.dispatch(ReducerEvent::Snapshot { snapshot: snapshot(90, 2_000), full_read: true, verification: false, now_ms: NOW + 1 });
-    let generation = harness.runtime.lifecycle_generation;
-
-    harness.settings.action = QuotaAction::InterruptImmediately;
-    harness.dispatch(ReducerEvent::FinalizeClosedEpisode {
-        transition_id: generation,
-        now_ms: NOW + 1,
-    });
-
-    let account = harness.runtime.account.expect("account");
-    assert_eq!(
-        account.episode_policy.expect("captured episode policy").action,
-        QuotaAction::FinishCurrentTurn
-    );
-    assert_eq!(account.phase, QuotaGuardPhase::Draining);
-    assert_eq!(account.allowed_drain_turns.len(), 1);
-}
-
-#[test]
 fn stale_or_early_interrupt_deadlines_cannot_trigger_extra_reconciliation() {
     let mut settings = QuotaGuardSettings::default();
     settings.action = QuotaAction::InterruptImmediately;

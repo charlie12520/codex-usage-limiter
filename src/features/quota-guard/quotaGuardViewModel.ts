@@ -2,10 +2,7 @@ import type { QuotaGuardPhase, QuotaGuardPublicState } from "./quotaGuardTypes";
 
 const PHASE_ORDER: readonly QuotaGuardPhase[] = [
   "interventionRequired",
-  "closing",
   "interrupting",
-  "awaitingDrainDecision",
-  "draining",
   "parked",
   "verifyingReset",
   "revalidatingIdentity",
@@ -18,9 +15,6 @@ const PHASE_LABELS: Record<QuotaGuardPhase, string> = {
   disabled: "Disabled",
   monitoring: "Monitoring",
   revalidatingIdentity: "Checking account",
-  closing: "Closing admission",
-  draining: "Finishing current turns",
-  awaitingDrainDecision: "Drain decision needed",
   interrupting: "Interrupting turns",
   parked: "Parked until reset",
   verifyingReset: "Verifying reset",
@@ -30,8 +24,6 @@ const PHASE_LABELS: Record<QuotaGuardPhase, string> = {
 
 export type QuotaGuardControls = {
   applyActionNow: boolean;
-  keepWaiting: boolean;
-  interruptNow: boolean;
   resolve: boolean;
 };
 
@@ -47,8 +39,6 @@ export function quotaGuardControls(state: QuotaGuardPublicState | null): QuotaGu
   if (!state) {
     return {
       applyActionNow: false,
-      keepWaiting: false,
-      interruptNow: false,
       resolve: false,
     };
   }
@@ -56,9 +46,6 @@ export function quotaGuardControls(state: QuotaGuardPublicState | null): QuotaGu
   return {
     applyActionNow:
       state.phase === "monitoring" && state.snapshotFresh && breachedWindows.length > 0,
-    keepWaiting: state.phase === "awaitingDrainDecision",
-    interruptNow:
-      state.phase === "awaitingDrainDecision" || state.phase === "draining",
     resolve: state.phase === "interventionRequired",
   };
 }

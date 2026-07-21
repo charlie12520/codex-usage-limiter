@@ -19,7 +19,6 @@ function state(phase: QuotaGuardPublicState["phase"]): QuotaGuardPublicState {
     snapshotFresh: true,
     breachedWindows: ["primary"],
     affectedTurns: [],
-    drainDeadline: null,
     verifyAt: null,
     monitorHealthy: true,
     lastError: null,
@@ -31,22 +30,15 @@ function state(phase: QuotaGuardPublicState["phase"]): QuotaGuardPublicState {
 describe("quota guard view model", () => {
   it("exposes only phase-authorized actions", () => {
     expect(quotaGuardControls(state("monitoring")).applyActionNow).toBe(true);
-    expect(quotaGuardControls(state("awaitingDrainDecision"))).toMatchObject({
-      keepWaiting: true,
-      interruptNow: true,
-    });
-    expect(quotaGuardControls(state("draining")).interruptNow).toBe(true);
     expect(quotaGuardControls(state("interventionRequired")).resolve).toBe(true);
   });
 
-  it("keeps deadline and intervention controls constrained to backend phases", () => {
+  it("keeps intervention controls constrained to backend phases", () => {
     expect(quotaGuardControls(state("verifyingReset"))).toMatchObject({
-      interruptNow: false,
       resolve: false,
     });
     expect(quotaGuardControls(state("interventionRequired"))).toMatchObject({
       resolve: true,
-      keepWaiting: false,
     });
   });
 

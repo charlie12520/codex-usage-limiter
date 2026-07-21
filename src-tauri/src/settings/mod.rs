@@ -154,9 +154,6 @@ pub(crate) fn validate_quota_guard_settings(settings: &AppSettings) -> Result<()
     if !(1..=100).contains(&guard.primary_threshold_percent) || !(1..=100).contains(&guard.secondary_threshold_percent) {
         return Err("QUOTA_GUARD_INVALID_THRESHOLD_PERCENT".to_string());
     }
-    if !(1..=1440).contains(&guard.drain_timeout_minutes) {
-        return Err("QUOTA_GUARD_INVALID_DRAIN_TIMEOUT_MINUTES".to_string());
-    }
     if guard.reset_grace_minutes > 1440 {
         return Err("QUOTA_GUARD_INVALID_RESET_GRACE_MINUTES".to_string());
     }
@@ -516,39 +513,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_enable_restores_the_prior_admission_policy() {
-        tauri::async_runtime::block_on(async {
-            let app_settings = Mutex::new(AppSettings::default());
-            let settings_update_lock = Mutex::new(());
-            let quota_guard = QuotaGuardHandle::default();
-            quota_guard
-                .gate()
-                .set_policy(ProcessPolicy::EnabledOpen);
-            let mut invalid_settings = enable_quota_guard();
-            invalid_settings.quota_guard.drain_timeout_minutes = 0;
-
-            let result = update_app_settings_transaction(
-                invalid_settings,
-                &app_settings,
-                &test_settings_path("invalid-enable"),
-                &settings_update_lock,
-                &quota_guard,
-            )
-            .await;
-            assert_eq!(
-                result.as_ref().err().map(String::as_str),
-                Some("QUOTA_GUARD_INVALID_DRAIN_TIMEOUT_MINUTES")
-            );
-            assert_eq!(
-                quota_guard.gate().policy(),
-                ProcessPolicy::EnabledOpen,
-                "a rejected enable must restore the policy it closed before validation"
-            );
-            assert!(!app_settings.lock().await.quota_guard.enabled);
-        });
-    }
-
-    #[test]
     fn failed_enable_write_restores_the_prior_admission_policy() {
         tauri::async_runtime::block_on(async {
             let app_settings = Mutex::new(AppSettings::default());
@@ -620,11 +584,10 @@ mod tests {
     }
 
     #[test]
-    fn quota_guard_validates_bounded_deadlines() {
+    fn quota_guard_validates_bounded_reset_grace() {
         let mut settings = AppSettings::default();
-        settings.quota_guard.drain_timeout_minutes = 0;
+        settings.quota_guard.reset_grace_minutes = 1441;
         assert!(validate_quota_guard_settings(&settings).is_err());
-        settings.quota_guard.drain_timeout_minutes = 1;
         settings.quota_guard.reset_grace_minutes = 1440;
         assert!(validate_quota_guard_settings(&settings).is_ok());
     }

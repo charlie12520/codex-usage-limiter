@@ -128,8 +128,6 @@ export type AppModalsProps = {
   quotaGuardQueueResumeRequired: boolean;
   onCloseQuotaGuardPanel: () => void;
   onQuotaGuardApplyActionNow: () => Promise<unknown>;
-  onQuotaGuardKeepWaiting: () => Promise<unknown>;
-  onQuotaGuardInterruptNow: () => Promise<unknown>;
   onQuotaGuardResolve: (resolution: QuotaGuardResolution) => Promise<unknown>;
   onQuotaGuardResumeQueuedSends: () => void;
 };
@@ -191,8 +189,6 @@ export const AppModals = memo(function AppModals({
   quotaGuardQueueResumeRequired,
   onCloseQuotaGuardPanel,
   onQuotaGuardApplyActionNow,
-  onQuotaGuardKeepWaiting,
-  onQuotaGuardInterruptNow,
   onQuotaGuardResolve,
   onQuotaGuardResumeQueuedSends,
 }: AppModalsProps) {
@@ -332,8 +328,6 @@ export const AppModals = memo(function AppModals({
           queueResumeRequired={quotaGuardQueueResumeRequired}
           onClose={onCloseQuotaGuardPanel}
           onApplyActionNow={onQuotaGuardApplyActionNow}
-          onKeepWaiting={onQuotaGuardKeepWaiting}
-          onInterruptNow={onQuotaGuardInterruptNow}
           onResolve={onQuotaGuardResolve}
           onResumeQueuedSends={onQuotaGuardResumeQueuedSends}
         />

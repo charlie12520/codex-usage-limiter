@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct GitFileStatus {
@@ -375,30 +375,42 @@ pub(crate) struct RemoteBackendTarget {
     pub(crate) last_connected_at_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuotaAction {
     NotifyOnly,
     InterruptImmediately,
-    FinishCurrentTurn,
 }
 
 impl Default for QuotaAction {
     fn default() -> Self {
-        Self::NotifyOnly
+        Self::InterruptImmediately
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum DrainTimeoutAction {
-    NotifyAndHold,
-    Interrupt,
+impl Serialize for QuotaAction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::NotifyOnly => "notifyOnly",
+            Self::InterruptImmediately => "interruptImmediately",
+        })
+    }
 }
 
-impl Default for DrainTimeoutAction {
-    fn default() -> Self {
-        Self::NotifyAndHold
+impl<'de> Deserialize<'de> for QuotaAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("notifyOnly") => Self::NotifyOnly,
+            // Legacy finishCurrentTurn and every unrecognized value now take
+            // the safe, enforcing default without rejecting settings.json.
+            _ => Self::InterruptImmediately,
+        })
     }
 }
 
@@ -408,7 +420,7 @@ pub(crate) struct QuotaGuardSettings {
     #[serde(default)]
     pub(crate) enabled: bool,
     /// When false the guard keeps monitoring usage but suppresses every
-    /// response (notify / finish turn / interrupt).
+    /// response (notify / interrupt).
     #[serde(default = "default_quota_guard_armed")]
     pub(crate) armed: bool,
     #[serde(default = "default_quota_guard_threshold")]
@@ -417,10 +429,6 @@ pub(crate) struct QuotaGuardSettings {
     pub(crate) secondary_threshold_percent: u8,
     #[serde(default)]
     pub(crate) action: QuotaAction,
-    #[serde(default = "default_drain_timeout_minutes")]
-    pub(crate) drain_timeout_minutes: u16,
-    #[serde(default)]
-    pub(crate) drain_timeout_action: DrainTimeoutAction,
     #[serde(default = "default_reset_grace_minutes")]
     pub(crate) reset_grace_minutes: u16,
     #[serde(default = "default_notify_when_available")]
@@ -438,9 +446,7 @@ impl Default for QuotaGuardSettings {
             armed: default_quota_guard_armed(),
             primary_threshold_percent: default_quota_guard_threshold(),
             secondary_threshold_percent: default_quota_guard_threshold(),
-            action: QuotaAction::NotifyOnly,
-            drain_timeout_minutes: default_drain_timeout_minutes(),
-            drain_timeout_action: DrainTimeoutAction::NotifyAndHold,
+            action: QuotaAction::InterruptImmediately,
             reset_grace_minutes: default_reset_grace_minutes(),
             notify_when_available: default_notify_when_available(),
             external_suspend: false,
@@ -449,11 +455,18 @@ impl Default for QuotaGuardSettings {
     }
 }
 
-fn default_quota_guard_armed() -> bool { true }
-fn default_quota_guard_threshold() -> u8 { 90 }
-fn default_drain_timeout_minutes() -> u16 { 15 }
-fn default_reset_grace_minutes() -> u16 { 10 }
-fn default_notify_when_available() -> bool { true }
+fn default_quota_guard_armed() -> bool {
+    true
+}
+fn default_quota_guard_threshold() -> u8 {
+    90
+}
+fn default_reset_grace_minutes() -> u16 {
+    10
+}
+fn default_notify_when_available() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct AppSettings {
@@ -1300,7 +1313,10 @@ mod tests {
         assert!(!settings.quota_guard.enabled);
         assert_eq!(settings.quota_guard.primary_threshold_percent, 90);
         assert_eq!(settings.quota_guard.secondary_threshold_percent, 90);
-        assert_eq!(settings.quota_guard.drain_timeout_minutes, 15);
+        assert_eq!(
+            settings.quota_guard.action,
+            super::QuotaAction::InterruptImmediately
+        );
         assert_eq!(settings.quota_guard.reset_grace_minutes, 10);
         assert!(settings.quota_guard.notify_when_available);
         assert!(!settings.quota_guard.prevent_new_sessions);
@@ -1459,6 +1475,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_or_unknown_quota_actions_fall_back_to_immediate_interrupt() {
+        for action in ["finishCurrentTurn", "futureAction"] {
+            let settings: AppSettings = serde_json::from_value(serde_json::json!({
+                "quotaGuard": { "action": action }
+            }))
+            .expect("settings deserialize");
+            assert_eq!(
+                settings.quota_guard.action,
+                super::QuotaAction::InterruptImmediately
+            );
+        }
+    }
+
+    #[test]
     fn workspace_group_defaults_from_minimal_json() {
         let group: WorkspaceGroup =
             serde_json::from_str(r#"{"id":"g1","name":"Group"}"#).expect("group deserialize");
@@ -1509,12 +1539,34 @@ mod tests {
     fn quota_guard_serializes_exact_camel_case_contract() {
         let settings = AppSettings::default();
         let value = serde_json::to_value(settings).expect("serialize settings");
-        let guard = value.get("quotaGuard").and_then(serde_json::Value::as_object).expect("quotaGuard object");
-        assert_eq!(guard.get("primaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
-        assert_eq!(guard.get("secondaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
-        assert_eq!(guard.get("action").and_then(serde_json::Value::as_str), Some("notifyOnly"));
-        assert_eq!(guard.get("drainTimeoutAction").and_then(serde_json::Value::as_str), Some("notifyAndHold"));
-        assert_eq!(guard.get("preventNewSessions").and_then(serde_json::Value::as_bool), Some(false));
+        let guard = value
+            .get("quotaGuard")
+            .and_then(serde_json::Value::as_object)
+            .expect("quotaGuard object");
+        assert_eq!(
+            guard
+                .get("primaryThresholdPercent")
+                .and_then(serde_json::Value::as_u64),
+            Some(90)
+        );
+        assert_eq!(
+            guard
+                .get("secondaryThresholdPercent")
+                .and_then(serde_json::Value::as_u64),
+            Some(90)
+        );
+        assert_eq!(
+            guard.get("action").and_then(serde_json::Value::as_str),
+            Some("interruptImmediately")
+        );
+        assert!(!guard.contains_key("drainTimeoutAction"));
+        assert!(!guard.contains_key("drainTimeoutMinutes"));
+        assert_eq!(
+            guard
+                .get("preventNewSessions")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
         assert!(!guard.contains_key("primary_threshold_percent"));
     }
 }

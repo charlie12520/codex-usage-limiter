@@ -59,8 +59,6 @@ const appSettings = {
     primaryThresholdPercent: 90,
     secondaryThresholdPercent: 90,
     action: "notifyOnly",
-    drainTimeoutMinutes: 15,
-    drainTimeoutAction: "interrupt",
     resetGraceMinutes: 10,
     notifyWhenAvailable: true,
   },
@@ -88,7 +86,6 @@ const publicState: QuotaGuardPublicState = {
   snapshotFresh: true,
   breachedWindows: [],
   affectedTurns: [],
-  drainDeadline: null,
   verifyAt: null,
   monitorHealthy: true,
   lastError: null,
@@ -117,8 +114,6 @@ beforeEach(() => {
     state: publicState,
     queueResumeRequired: false,
     applyActionNow: vi.fn(),
-    keepWaiting: vi.fn(),
-    interruptNow: vi.fn(),
     rearm: vi.fn(),
     resolveIntervention: vi.fn(),
     resumeQueuedSends: vi.fn(),
@@ -189,7 +184,7 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByText("Settings")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Trigger response below" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
       target: { value: "25" },
     });
@@ -200,7 +195,7 @@ describe("UsageLimiterApp", () => {
 
     await waitFor(() => expect(updateAppSettings).toHaveBeenCalledOnce());
     const updated = vi.mocked(updateAppSettings).mock.calls[0]?.[0].quotaGuard;
-    expect(updated.action).toBe("finishCurrentTurn");
+    expect(updated.action).toBe("interruptImmediately");
     expect(updated.primaryThresholdPercent).toBe(75);
     expect(updated.secondaryThresholdPercent).toBe(75);
     await waitFor(() => expect(document.documentElement.dataset.appearance).toBe("dark"));
@@ -217,17 +212,16 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     expect(screen.getByRole("button", { name: "Notify" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Finish turn" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Interrupt" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Save changes" }).hasAttribute("disabled")).toBe(true);
 
     resolveUpdate({
       ...appSettings,
-      quotaGuard: { ...appSettings.quotaGuard, action: "finishCurrentTurn" },
+      quotaGuard: { ...appSettings.quotaGuard, action: "interruptImmediately" },
     });
     await waitFor(() => expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy());
   });
@@ -237,7 +231,7 @@ describe("UsageLimiterApp", () => {
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
       target: { value: "82" },
     });
@@ -253,12 +247,12 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("save rejected"));
     expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("button", { name: "Finish turn" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
     expect(screen.getByText("Settings")).toBeTruthy();
   });
 
@@ -267,8 +261,6 @@ describe("UsageLimiterApp", () => {
       state: { ...publicState, snapshotFresh: false },
       queueResumeRequired: false,
       applyActionNow: vi.fn(),
-      keepWaiting: vi.fn(),
-      interruptNow: vi.fn(),
       rearm: vi.fn(),
       resolveIntervention: vi.fn(),
       resumeQueuedSends: vi.fn(),

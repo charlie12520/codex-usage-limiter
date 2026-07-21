@@ -1,9 +1,9 @@
-use std::collections::BTreeSet;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) use crate::types::{DrainTimeoutAction, QuotaAction};
+pub(crate) use crate::types::QuotaAction;
 use crate::types::QuotaGuardSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,9 +12,6 @@ pub(crate) enum QuotaGuardPhase {
     Disabled,
     Monitoring,
     RevalidatingIdentity,
-    Closing,
-    Draining,
-    AwaitingDrainDecision,
     Interrupting,
     Parked,
     VerifyingReset,
@@ -74,7 +71,9 @@ pub(crate) enum EpisodeKey {
         threshold_percent: u8,
         resets_at: Option<i64>,
     },
-    HardLimit { account_key: String },
+    HardLimit {
+        account_key: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,8 +84,6 @@ pub(crate) struct EpisodePolicy {
     pub(crate) external_suspend: bool,
     #[serde(default)]
     pub(crate) prevent_new_sessions: bool,
-    pub(crate) drain_timeout_minutes: u16,
-    pub(crate) drain_timeout_action: DrainTimeoutAction,
     pub(crate) reset_grace_minutes: u16,
 }
 
@@ -112,7 +109,10 @@ pub(crate) struct TurnKey {
 
 impl TurnKey {
     pub(crate) fn stable_id(&self) -> String {
-        format!("{}\u{1f}{}\u{1f}{}\u{1f}{}", self.session_epoch, self.workspace_id, self.thread_id, self.turn_id)
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            self.session_epoch, self.workspace_id, self.thread_id, self.turn_id
+        )
     }
 }
 
@@ -132,7 +132,6 @@ pub(crate) struct PendingInterrupt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum PendingStartDisposition {
-    AllowOnBind,
     InterruptOnBind,
 }
 
@@ -202,12 +201,10 @@ pub(crate) struct AccountRuntime {
     pub(crate) activity_entries: Vec<QuotaGuardActivityEntry>,
     #[serde(default)]
     pub(crate) suspended_external_engines: Vec<SuspendedExternalEngine>,
-    pub(crate) allowed_drain_turns: Vec<TurnKey>,
     /// Canonical exact-turn index. Every interrupt lifecycle transition is
     /// keyed by the immutable session/workspace/thread/turn identity.
     #[serde(default)]
     pub(crate) pending_interrupt_index: BTreeMap<String, PendingInterrupt>,
-    pub(crate) drain_deadline: Option<i64>,
     pub(crate) verify_at: Option<i64>,
     pub(crate) monitor_healthy: bool,
     pub(crate) last_error: Option<String>,
@@ -300,9 +297,7 @@ impl AccountRuntime {
             terminal_observations: Vec::new(),
             activity_entries: Vec::new(),
             suspended_external_engines: Vec::new(),
-            allowed_drain_turns: Vec::new(),
             pending_interrupt_index: BTreeMap::new(),
-            drain_deadline: None,
             verify_at: None,
             monitor_healthy: true,
             last_error: None,
@@ -313,14 +308,19 @@ impl AccountRuntime {
     pub(crate) fn push_activity(&mut self, activity: QuotaGuardActivityEntry) {
         self.activity_entries.push(activity);
         if self.activity_entries.len() > 100 {
-            self.activity_entries.drain(..self.activity_entries.len() - 100);
+            self.activity_entries
+                .drain(..self.activity_entries.len() - 100);
         }
     }
     pub(crate) fn insert_pending_interrupt(&mut self, pending: PendingInterrupt) {
-        self.pending_interrupt_index.insert(pending.turn.stable_id(), pending);
+        self.pending_interrupt_index
+            .insert(pending.turn.stable_id(), pending);
     }
 
-    pub(crate) fn push_unmatched_started_turn(&mut self, observation: UnmatchedStartedTurn) -> Result<(), String> {
+    pub(crate) fn push_unmatched_started_turn(
+        &mut self,
+        observation: UnmatchedStartedTurn,
+    ) -> Result<(), String> {
         if self.unmatched_started_turns.len() >= 32 {
             return Err("unmatched turn observation buffer overflow".into());
         }
@@ -328,7 +328,10 @@ impl AccountRuntime {
         Ok(())
     }
 
-    pub(crate) fn push_terminal_observation(&mut self, observation: TerminalObservation) -> Result<(), String> {
+    pub(crate) fn push_terminal_observation(
+        &mut self,
+        observation: TerminalObservation,
+    ) -> Result<(), String> {
         if self.terminal_observations.len() >= 32 {
             return Err("terminal observation buffer overflow".into());
         }
@@ -362,6 +365,12 @@ mod tests {
             });
         }
         assert_eq!(account.activity_entries.len(), 100);
-        assert_eq!(account.activity_entries.first().map(|entry| entry.timestamp), Some(1));
+        assert_eq!(
+            account
+                .activity_entries
+                .first()
+                .map(|entry| entry.timestamp),
+            Some(1)
+        );
     }
 }

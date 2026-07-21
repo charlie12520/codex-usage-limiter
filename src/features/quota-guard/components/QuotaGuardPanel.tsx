@@ -6,7 +6,6 @@ import {
   type QuotaGuardResolution,
 } from "../quotaGuardTypes";
 import { formatQuotaGuardTimestamp, quotaGuardControls, quotaGuardPhaseLabel } from "../quotaGuardViewModel";
-import { QuotaGuardDrainDecision } from "./QuotaGuardDrainDecision";
 
 type Props = {
   activeWorkspaceId: string | null;
@@ -14,8 +13,6 @@ type Props = {
   queueResumeRequired: boolean;
   onClose: () => void;
   onApplyActionNow: () => Promise<unknown>;
-  onKeepWaiting: () => Promise<unknown>;
-  onInterruptNow: () => Promise<unknown>;
   onResolve: (resolution: QuotaGuardResolution) => Promise<unknown>;
   onResumeQueuedSends: () => void;
 };
@@ -26,8 +23,6 @@ export function QuotaGuardPanel({
   queueResumeRequired,
   onClose,
   onApplyActionNow,
-  onKeepWaiting,
-  onInterruptNow,
   onResolve,
   onResumeQueuedSends,
 }: Props) {
@@ -74,7 +69,6 @@ export function QuotaGuardPanel({
               <div><dt>Account</dt><dd>{state.accountLabel ?? "Not verified"}</dd></div>
               <div><dt>Observed</dt><dd>{state.snapshotFresh ? "Fresh" : "Stale or unavailable"}</dd></div>
               <div><dt>Breaches</dt><dd>{breachedWindows.join(", ") || "None"}</dd></div>
-              <div><dt>Drain deadline</dt><dd>{formatQuotaGuardTimestamp(state.drainDeadline)}</dd></div>
               <div><dt>Verification</dt><dd>{formatQuotaGuardTimestamp(state.verifyAt)}</dd></div>
               <div><dt>Monitor</dt><dd>{state.monitorHealthy ? "Healthy" : state.lastError ?? "Needs attention"}</dd></div>
             </dl>
@@ -112,8 +106,6 @@ export function QuotaGuardPanel({
               </div>
             ) : null}
             {controls.applyActionNow ? <button type="button" className="primary" onClick={() => void onApplyActionNow()}>Apply action now</button> : null}
-            {controls.keepWaiting ? <QuotaGuardDrainDecision onKeepWaiting={() => void onKeepWaiting()} onInterruptNow={() => void onInterruptNow()} /> : null}
-            {controls.interruptNow && !controls.keepWaiting ? <button type="button" className="danger" onClick={() => void onInterruptNow()}>Interrupt now</button> : null}
             {controls.resolve ? <div className="modal-actions"><button type="button" className="danger" onClick={requestDurableDisable}>Disable guard and open</button><button type="button" className="ghost" onClick={() => void onResolve("retryClosed")}>Keep closed and retry</button></div> : null}
             {canResumeQueue ? <button type="button" className="primary" onClick={onResumeQueuedSends}>Resume queued sends</button> : null}
             <div className="settings-field">

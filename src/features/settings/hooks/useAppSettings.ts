@@ -32,9 +32,7 @@ const DEFAULT_QUOTA_GUARD_SETTINGS: AppSettings["quotaGuard"] = {
   enabled: false,
   primaryThresholdPercent: 90,
   secondaryThresholdPercent: 90,
-  action: "notifyOnly",
-  drainTimeoutMinutes: 15,
-  drainTimeoutAction: "notifyAndHold",
+  action: "interruptImmediately",
   resetGraceMinutes: 10,
   notifyWhenAvailable: true,
   externalSuspend: false,
@@ -74,19 +72,7 @@ function normalizeQuotaGuardSettings(value: unknown): AppSettings["quotaGuard"] 
       0,
       100,
     ),
-    action:
-      settings.action === "interruptImmediately" ||
-      settings.action === "finishCurrentTurn"
-        ? settings.action
-        : "notifyOnly",
-    drainTimeoutMinutes: normalizeInteger(
-      settings.drainTimeoutMinutes,
-      DEFAULT_QUOTA_GUARD_SETTINGS.drainTimeoutMinutes,
-      1,
-      1440,
-    ),
-    drainTimeoutAction:
-      settings.drainTimeoutAction === "interrupt" ? "interrupt" : "notifyAndHold",
+    action: settings.action === "notifyOnly" ? "notifyOnly" : "interruptImmediately",
     resetGraceMinutes: normalizeInteger(
       settings.resetGraceMinutes,
       DEFAULT_QUOTA_GUARD_SETTINGS.resetGraceMinutes,

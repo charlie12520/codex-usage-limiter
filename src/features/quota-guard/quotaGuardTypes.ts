@@ -4,9 +4,6 @@ export type QuotaGuardPhase =
   | "disabled"
   | "monitoring"
   | "revalidatingIdentity"
-  | "closing"
-  | "draining"
-  | "awaitingDrainDecision"
   | "interrupting"
   | "parked"
   | "verifyingReset"
@@ -72,7 +69,6 @@ export type QuotaGuardPublicState = {
   snapshotFresh: boolean;
   breachedWindows: QuotaGuardWindowKind[];
   affectedTurns: QuotaGuardTurn[];
-  drainDeadline: number | null;
   verifyAt: number | null;
   monitorHealthy: boolean;
   lastError: string | null;

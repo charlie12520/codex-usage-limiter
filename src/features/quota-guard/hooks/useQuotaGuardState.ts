@@ -2,8 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   quotaGuardApplyActionNow,
   quotaGuardGetState,
-  quotaGuardInterruptNow,
-  quotaGuardKeepWaiting,
   quotaGuardRearm,
   quotaGuardResolveIntervention,
 } from "@/services/tauri";
@@ -15,8 +13,6 @@ export type QuotaGuardController = {
   state: QuotaGuardPublicState | null;
   queueResumeRequired: boolean;
   applyActionNow: () => Promise<QuotaGuardPublicState>;
-  keepWaiting: () => Promise<QuotaGuardPublicState>;
-  interruptNow: () => Promise<QuotaGuardPublicState>;
   rearm: () => Promise<QuotaGuardPublicState>;
   resolveIntervention: (resolution: QuotaGuardResolution) => Promise<QuotaGuardPublicState>;
   resumeQueuedSends: (workspaceId: string | null) => boolean;
@@ -70,8 +66,6 @@ export function useQuotaGuardState(onOpenPanel?: () => void) {
   const actions = useMemo(
     () => ({
       applyActionNow: () => update(quotaGuardApplyActionNow),
-      keepWaiting: () => update(quotaGuardKeepWaiting),
-      interruptNow: () => update(quotaGuardInterruptNow),
       rearm: () => update(quotaGuardRearm),
       resolveIntervention: (resolution: QuotaGuardResolution) =>
         update(() => quotaGuardResolveIntervention(resolution)),

@@ -238,10 +238,7 @@ export type OpenAppTarget = {
 
 export type QuotaAction =
   | "notifyOnly"
-  | "interruptImmediately"
-  | "finishCurrentTurn";
-
-export type DrainTimeoutAction = "notifyAndHold" | "interrupt";
+  | "interruptImmediately";
 
 export type QuotaGuardSettings = {
   enabled: boolean;
@@ -250,8 +247,6 @@ export type QuotaGuardSettings = {
   primaryThresholdPercent: number;
   secondaryThresholdPercent: number;
   action: QuotaAction;
-  drainTimeoutMinutes: number;
-  drainTimeoutAction: DrainTimeoutAction;
   resetGraceMinutes: number;
   notifyWhenAvailable: boolean;
   externalSuspend?: boolean;

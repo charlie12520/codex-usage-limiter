@@ -67,12 +67,6 @@ const responseOptions: Array<{
     description: "Show an alert and keep working.",
   },
   {
-    value: "finishCurrentTurn",
-    shortLabel: "Finish turn",
-    title: "Finish current turn",
-    description: "Let active turns finish, then pause.",
-  },
-  {
     value: "interruptImmediately",
     shortLabel: "Interrupt",
     title: "Interrupt immediately",

@@ -67,26 +67,10 @@ export function SettingsQuotaGuardSection({ appSettings, onUpdateAppSettings }: 
       <div className="settings-field">
         <label className="settings-field-label" htmlFor="quota-action">When a threshold is reached</label>
         <select id="quota-action" className="settings-select" value={quotaGuard.action} onChange={(event) => update({ action: event.target.value as AppSettings["quotaGuard"]["action"] })}>
-          <option value="notifyOnly">Notify only</option>
           <option value="interruptImmediately">Interrupt immediately</option>
-          <option value="finishCurrentTurn">Finish current turn</option>
+          <option value="notifyOnly">Notify only</option>
         </select>
       </div>
-      {quotaGuard.action === "finishCurrentTurn" ? (
-        <>
-          <div className="settings-field">
-            <label className="settings-field-label" htmlFor="quota-drain-timeout">Drain timeout (minutes)</label>
-            <input id="quota-drain-timeout" className="settings-input" type="number" min={1} max={1440} value={quotaGuard.drainTimeoutMinutes} onChange={(event) => update({ drainTimeoutMinutes: Number(event.target.value) })} />
-          </div>
-          <div className="settings-field">
-            <label className="settings-field-label" htmlFor="quota-drain-action">At drain timeout</label>
-            <select id="quota-drain-action" className="settings-select" value={quotaGuard.drainTimeoutAction} onChange={(event) => update({ drainTimeoutAction: event.target.value as AppSettings["quotaGuard"]["drainTimeoutAction"] })}>
-              <option value="notifyAndHold">Notify and hold</option>
-              <option value="interrupt">Interrupt remaining turns</option>
-            </select>
-          </div>
-        </>
-      ) : null}
       <div className="settings-field">
         <label className="settings-field-label" htmlFor="quota-reset-grace">Reset grace (minutes)</label>
         <input id="quota-reset-grace" className="settings-input" type="number" min={0} max={1440} value={quotaGuard.resetGraceMinutes} onChange={(event) => update({ resetGraceMinutes: Number(event.target.value) })} />

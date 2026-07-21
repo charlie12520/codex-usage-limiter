@@ -23,8 +23,8 @@ mod menu;
 mod menu;
 mod notifications;
 mod prompts;
-mod remote_backend;
 mod quota_guard_runtime;
+mod remote_backend;
 mod rules;
 mod settings;
 mod shared;
@@ -63,7 +63,8 @@ async fn stop_managed_daemons_for_exit(app_handle: tauri::AppHandle) {
     quota_guard_runtime::resume_external_engines_for_shutdown(
         &state.quota_guard,
         &state.quota_guard_state_path,
-    ).await;
+    )
+    .await;
     let _ = tailscale::tailscale_daemon_stop(state).await;
 }
 
@@ -125,7 +126,10 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             notifications::register_windows_toast_identity(
                 &app.config().identifier,
-                app.config().product_name.as_deref().unwrap_or("Codex Usage Limiter"),
+                app.config()
+                    .product_name
+                    .as_deref()
+                    .unwrap_or("Codex Usage Limiter"),
             );
             let state = state::AppState::load(&app.handle());
             app.manage(state);
@@ -197,8 +201,6 @@ pub fn run() {
             settings::get_codex_config_path,
             quota_guard_runtime::quota_guard_get_state,
             quota_guard_runtime::quota_guard_apply_action_now,
-            quota_guard_runtime::quota_guard_keep_waiting,
-            quota_guard_runtime::quota_guard_interrupt_now,
             quota_guard_runtime::quota_guard_verify_now,
             quota_guard_runtime::quota_guard_rearm,
             quota_guard_runtime::quota_guard_resolve_intervention,
