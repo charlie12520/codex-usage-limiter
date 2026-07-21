@@ -27,6 +27,7 @@ use crate::types::QuotaGuardSettings;
 
 const BLOCKED_PREFIX: &str = "QUOTA_GUARD_BLOCKED";
 const THRESHOLD_SETTLE_DELAY_MS: i64 = 10_000;
+const MONITOR_POLL_INTERVAL_MS: i64 = 10_000;
 
 #[derive(Clone)]
 struct LocalAppServerControl {
@@ -187,11 +188,13 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                         if let Some(deadline) = account.drain_deadline { schedule_drain(&handle, generation, deadline); }
                         if matches!(account.phase, QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset) {
                             if let Some(verify_at) = account.verify_at { schedule_verification(&handle, generation, verify_at); }
-                        } else if matches!(account.phase, QuotaGuardPhase::Monitoring | QuotaGuardPhase::InterventionRequired) {
-                            // First read fires immediately so a fresh launch shows current
-                            // usage instead of the persisted snapshot from the last run.
-                            schedule_healthy_revalidation(&handle, generation, now_ms());
                         }
+                        // First read fires immediately so a fresh launch shows current
+                        // usage instead of the persisted snapshot from the last run. A
+                        // parked episode still needs these reads for monitor health and
+                        // external-engine re-sweeps; reducer semantics keep its threshold
+                        // evaluation blocked until verification is due.
+                        schedule_monitor_poll_if_enabled(&handle, generation, now_ms()).await;
                         apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::RehydratePendingInterrupts { now_ms: now_ms() }).await
                     } else {
                         Ok(())
@@ -222,16 +225,15 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                 apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::ProvisionalExpired { turn, generation, terminal, now_ms: now_ms() }).await,
             ActorEvent::HealthyRevalidate { generation, due_at } => {
                 let runtime = handle.runtime().await;
-                let pollable = runtime.lifecycle_generation == generation
-                    && runtime.account.as_ref().is_some_and(|account| matches!(account.phase, QuotaGuardPhase::Monitoring | QuotaGuardPhase::InterventionRequired));
-                if pollable && now_ms() >= due_at {
+                let pollable = monitor_pollable(&runtime, generation);
+                let due = now_ms() >= due_at;
+                if due {
                     *handle.inner.scheduled_healthy_due.lock().expect("healthy timer lock poisoned") = None;
+                }
+                if pollable && due {
                     match healthy_revalidate(&handle, &app, &path, &mut bindings).await {
                         Ok(()) => {
-                            let runtime = handle.runtime().await;
-                            if runtime.lifecycle_generation == generation && runtime.account.as_ref().is_some_and(|account| matches!(account.phase, QuotaGuardPhase::Monitoring | QuotaGuardPhase::InterventionRequired)) {
-                                schedule_healthy_revalidation(&handle, generation, now_ms().saturating_add(10_000));
-                            }
+                            schedule_monitor_poll_if_enabled(&handle, generation, now_ms().saturating_add(MONITOR_POLL_INTERVAL_MS)).await;
                             Ok(())
                         }
                         Err(error) => Err(error),
@@ -244,9 +246,7 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
         if let Err(error) = result {
             mark_intervention(&handle, &path, &error).await;
             let runtime = handle.runtime().await;
-            if runtime.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::InterventionRequired) {
-                schedule_healthy_revalidation(&handle, runtime.lifecycle_generation, now_ms().saturating_add(10_000));
-            }
+            schedule_monitor_poll_if_enabled(&handle, runtime.lifecycle_generation, now_ms().saturating_add(MONITOR_POLL_INTERVAL_MS)).await;
         }
         *handle.inner.bindings.lock().await = bindings.clone();
         emit_state(&app, &handle).await;
@@ -503,9 +503,7 @@ async fn bootstrap_workspace(handle: &QuotaGuardHandle, app: &AppHandle, path: &
     }
     persist_current(handle, path).await?;
     let runtime = handle.runtime().await;
-    if runtime.account.as_ref().is_some_and(|account| matches!(account.phase, QuotaGuardPhase::Monitoring | QuotaGuardPhase::InterventionRequired)) {
-        schedule_healthy_revalidation(handle, runtime.lifecycle_generation, now_ms().saturating_add(10_000));
-    }
+    schedule_monitor_poll_if_enabled(handle, runtime.lifecycle_generation, now_ms().saturating_add(MONITOR_POLL_INTERVAL_MS)).await;
     if handle.inner.gate.policy() == ProcessPolicy::EnabledOpen { handle.inner.gate.set_epoch_open(&epoch, workspace_id, true); }
     Ok(())
 }
@@ -694,6 +692,24 @@ fn schedule_healthy_revalidation(handle: &QuotaGuardHandle, generation: u64, due
     *scheduled = Some(due_at);
     drop(scheduled);
     schedule_event(handle, due_at, ActorEvent::HealthyRevalidate { generation, due_at });
+}
+
+fn monitor_polling_enabled(phase: QuotaGuardPhase) -> bool {
+    phase != QuotaGuardPhase::Disabled
+}
+
+fn monitor_pollable(runtime: &crate::shared::quota_guard::model::QuotaGuardRuntimeState, generation: u64) -> bool {
+    runtime.lifecycle_generation == generation
+        && runtime.account.as_ref().is_some_and(|account| monitor_polling_enabled(account.phase))
+}
+
+async fn schedule_monitor_poll_if_enabled(handle: &QuotaGuardHandle, generation: u64, due_at: i64) -> bool {
+    if monitor_pollable(&handle.runtime().await, generation) {
+        schedule_healthy_revalidation(handle, generation, due_at);
+        true
+    } else {
+        false
+    }
 }
 
 async fn verify_once(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, manual: bool) -> Result<(), String> {
@@ -1101,6 +1117,50 @@ mod tests {
             assert!(!change.updated.armed);
             assert!(handle.runtime().await.pending_thresholds.is_none());
         });
+    }
+
+    #[test]
+    fn parked_account_schedules_periodic_rate_limit_read() {
+        tauri::async_runtime::block_on(async {
+            let handle = QuotaGuardHandle::default();
+            let (sender, mut receiver) = mpsc::channel(1);
+            *handle.inner.sender.lock().expect("sender lock") = Some(sender);
+            let generation = 7;
+            let mut account = AccountRuntime::new("account".into(), 1);
+            account.phase = QuotaGuardPhase::Parked;
+            {
+                let mut runtime = handle.inner.runtime.lock().await;
+                runtime.lifecycle_generation = generation;
+                runtime.account = Some(account);
+            }
+
+            let due_at = now_ms();
+            assert!(schedule_monitor_poll_if_enabled(&handle, generation, due_at).await);
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await,
+                Ok(Some(ActorEvent::HealthyRevalidate { generation: observed_generation, due_at: observed_due_at }))
+                    if observed_generation == generation && observed_due_at == due_at
+            ));
+        });
+    }
+
+    #[test]
+    fn monitor_polling_remains_enabled_for_every_active_phase() {
+        for phase in [
+            QuotaGuardPhase::Monitoring,
+            QuotaGuardPhase::RevalidatingIdentity,
+            QuotaGuardPhase::Closing,
+            QuotaGuardPhase::Draining,
+            QuotaGuardPhase::AwaitingDrainDecision,
+            QuotaGuardPhase::Interrupting,
+            QuotaGuardPhase::Parked,
+            QuotaGuardPhase::VerifyingReset,
+            QuotaGuardPhase::Ready,
+            QuotaGuardPhase::InterventionRequired,
+        ] {
+            assert!(monitor_polling_enabled(phase), "{phase:?} must keep polling rate limits");
+        }
+        assert!(!monitor_polling_enabled(QuotaGuardPhase::Disabled));
     }
     #[test]
     fn non_enable_action_change_keeps_breached_notify_only_monitoring_open_until_apply() {
