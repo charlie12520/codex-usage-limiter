@@ -48,6 +48,7 @@ const MODE_WINDOWS: Record<WindowMode, { width: number; height: number; minWidth
   pill: { width: 280, height: 72, minWidth: 280, minHeight: 72, resizable: false },
 };
 const SETTINGS_WINDOW = { width: 420, height: 470, minWidth: 420, minHeight: 470, resizable: false };
+const SETTINGS_FOOTER_HEIGHT = 52;
 
 const windowModeOptions: Array<{ value: WindowMode; label: string; dims: string }> = [
   { value: "compact", label: "Compact", dims: "420 × 204" },
@@ -177,6 +178,7 @@ export function UsageLimiterApp() {
   const dragValue = useRef<number | null>(null);
   const rearmDebounce = useRef<number | null>(null);
   const bootScreenApplied = useRef(false);
+  const settingsContentRef = useRef<HTMLDivElement | null>(null);
 
   const load = useCallback(async () => {
     setBusy("load");
@@ -239,10 +241,33 @@ export function UsageLimiterApp() {
   }, [alwaysOnTop]);
 
   useEffect(() => {
+    const appWindow = getCurrentWindow();
+    if (typeof appWindow.isAlwaysOnTop !== "function") return;
+    void appWindow.isAlwaysOnTop()
+      .then((enabled) => {
+        setAlwaysOnTop(enabled);
+        setDraftAlwaysOnTop(enabled);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     void (async () => {
       try {
         const appWindow = getCurrentWindow();
-        const target = screen === "settings" ? SETTINGS_WINDOW : MODE_WINDOWS[windowMode];
+        const measuredSettingsHeight = screen === "settings"
+          ? Math.max(
+              SETTINGS_WINDOW.height,
+              (settingsContentRef.current?.scrollHeight ?? 0) + SETTINGS_FOOTER_HEIGHT,
+            )
+          : null;
+        const target = screen === "settings"
+          ? {
+              ...SETTINGS_WINDOW,
+              height: measuredSettingsHeight ?? SETTINGS_WINDOW.height,
+              minHeight: measuredSettingsHeight ?? SETTINGS_WINDOW.minHeight,
+            }
+          : MODE_WINDOWS[windowMode];
         await appWindow.setAlwaysOnTop(alwaysOnTop);
         if (IS_MAC) {
           // Pill has no titlebar; hide the traffic lights with it. Windows and
@@ -256,7 +281,7 @@ export function UsageLimiterApp() {
         setError(`Window update failed: ${String(windowError)}`);
       }
     })();
-  }, [screen, windowMode, alwaysOnTop]);
+  }, [screen, windowMode, alwaysOnTop, draft?.action, rearmInput]);
 
   const persistDraft = useCallback(async (nextDraft: QuotaGuardSettings) => {
     if (!settings) return false;
@@ -720,7 +745,7 @@ export function UsageLimiterApp() {
         </div>
       ) : (
         <div className="limiter-page limiter-settings-page">
-          <div className="limiter-settings-content">
+          <div className="limiter-settings-content" ref={settingsContentRef}>
             <div className="limiter-settings-group">Limit</div>
             <section className="limiter-settings-card">
               <div className="limiter-settings-row limiter-settings-row--response">
@@ -743,7 +768,7 @@ export function UsageLimiterApp() {
               </div>
               <div className="limiter-settings-row limiter-rearm-row">
                 <h2>
-                  <label htmlFor="rearm-after-reset">Rearm after reset at <input id="rearm-after-reset" inputMode="numeric" placeholder="—" value={rearmInput} disabled={busy === "save"} onChange={(event) => changeRearmAfterReset(event.target.value)} />% left</label>
+                  <label htmlFor="rearm-after-reset">Rearm after reset at <input id="rearm-after-reset" type="text" inputMode="numeric" placeholder="—" value={rearmInput} disabled={busy === "save"} onChange={(event) => changeRearmAfterReset(event.target.value)} />% left</label>
                 </h2>
                 {rearmInput !== "" ? <p>When usage resets, the switch arms itself with the trigger at {clampRemainingFloor(Number(rearmInput))}% left.</p> : null}
               </div>

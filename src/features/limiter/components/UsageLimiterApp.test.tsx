@@ -249,6 +249,37 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByText(/Interrupt and Block freeze every Codex app instantly/)).toBeTruthy();
   });
 
+  it("renders the rearm field as a spinner-free numeric text input", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    const input = screen.getByRole("textbox", {
+      name: "Rearm after reset at % left",
+    }) as HTMLInputElement;
+    expect(input.type).toBe("text");
+    expect(input.inputMode).toBe("numeric");
+    expect(input.getAttribute("type")).toBe("text");
+  });
+
+  it("reflects loaded foreground and login settings in checked switches", async () => {
+    localStorage.setItem("codex-usage-limiter.alwaysOnTop", "true");
+    vi.mocked(getAutostart).mockResolvedValue(true);
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    await waitFor(() => {
+      expect(
+        (screen.getByRole("checkbox", { name: "Keep in foreground" }) as HTMLInputElement)
+          .checked,
+      ).toBe(true);
+      expect(
+        (screen.getByRole("checkbox", { name: "Start at login" }) as HTMLInputElement).checked,
+      ).toBe(true);
+    });
+  });
+
   it("disables settings controls while one settings write is pending", async () => {
     let resolveUpdate: (value: AppSettings) => void = () => undefined;
     const pendingUpdate = new Promise<AppSettings>((resolve) => {

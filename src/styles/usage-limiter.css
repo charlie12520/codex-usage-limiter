@@ -318,11 +318,6 @@ select:disabled {
   background: var(--healthy);
 }
 
-.limiter-settings-page .reference-switch input:checked + span {
-  border-color: var(--accent);
-  background: var(--accent);
-}
-
 .reference-switch input:checked + span::after {
   transform: translateX(18px);
 }
@@ -1132,6 +1127,7 @@ select:disabled {
 .limiter-settings-content {
   display: block;
   padding: 14px 18px 4px;
+  overflow: hidden;
 }
 
 .limiter-settings-group {
@@ -1240,6 +1236,7 @@ select:disabled {
 
 .limiter-rearm-row input {
   width: 44px;
+  height: 28px;
   margin: 0 2px;
   padding: 5px 6px;
   border: 1px solid var(--border);
@@ -1248,10 +1245,20 @@ select:disabled {
   color: var(--text);
   font: 600 12.5px inherit;
   text-align: center;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: textfield;
+  vertical-align: baseline;
 }
 
 .limiter-rearm-row input::placeholder {
   color: var(--muted);
+}
+
+.limiter-rearm-row input::-webkit-inner-spin-button,
+.limiter-rearm-row input::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
 }
 
 .limiter-settings-row--window h2 {
