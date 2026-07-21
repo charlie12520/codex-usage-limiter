@@ -36,37 +36,18 @@ describe("quota guard view model", () => {
       interruptNow: true,
     });
     expect(quotaGuardControls(state("draining")).interruptNow).toBe(true);
-    expect(quotaGuardControls(state("parked")).rearm).toBe(true);
     expect(quotaGuardControls(state("interventionRequired")).resolve).toBe(true);
   });
 
   it("keeps deadline and intervention controls constrained to backend phases", () => {
     expect(quotaGuardControls(state("verifyingReset"))).toMatchObject({
-      rearm: true,
       interruptNow: false,
       resolve: false,
     });
     expect(quotaGuardControls(state("interventionRequired"))).toMatchObject({
-      rearm: true,
       resolve: true,
       keepWaiting: false,
     });
-  });
-
-  it("shows rearm for every active enforcement episode and nowhere else", () => {
-    for (const phase of [
-      "parked",
-      "verifyingReset",
-      "draining",
-      "awaitingDrainDecision",
-      "interrupting",
-      "interventionRequired",
-    ] as const) {
-      expect(quotaGuardControls(state(phase)).rearm).toBe(true);
-    }
-    for (const phase of ["disabled", "monitoring", "revalidatingIdentity", "closing", "ready"] as const) {
-      expect(quotaGuardControls(state(phase)).rearm).toBe(false);
-    }
   });
 
   it("fails closed for missing enabled-workspace admissions while preserving disabled openness", () => {

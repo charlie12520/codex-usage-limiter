@@ -105,7 +105,7 @@ export function SettingsQuotaGuardSection({ appSettings, onUpdateAppSettings }: 
         />
       </SettingsToggleRow>
       <SettingsToggleRow
-        title="Prevent new sessions while under the limit"
+        title="Prevent new Codex sessions while under the limit"
         subtitle="While the floor is breached, also freeze Codex engines launched after the trip."
       >
         <SettingsToggleSwitch

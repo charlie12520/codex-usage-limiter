@@ -16,7 +16,6 @@ type Props = {
   onApplyActionNow: () => Promise<unknown>;
   onKeepWaiting: () => Promise<unknown>;
   onInterruptNow: () => Promise<unknown>;
-  onRearm: () => Promise<unknown>;
   onResolve: (resolution: QuotaGuardResolution) => Promise<unknown>;
   onResumeQueuedSends: () => void;
 };
@@ -29,7 +28,6 @@ export function QuotaGuardPanel({
   onApplyActionNow,
   onKeepWaiting,
   onInterruptNow,
-  onRearm,
   onResolve,
   onResumeQueuedSends,
 }: Props) {
@@ -116,7 +114,6 @@ export function QuotaGuardPanel({
             {controls.applyActionNow ? <button type="button" className="primary" onClick={() => void onApplyActionNow()}>Apply action now</button> : null}
             {controls.keepWaiting ? <QuotaGuardDrainDecision onKeepWaiting={() => void onKeepWaiting()} onInterruptNow={() => void onInterruptNow()} /> : null}
             {controls.interruptNow && !controls.keepWaiting ? <button type="button" className="danger" onClick={() => void onInterruptNow()}>Interrupt now</button> : null}
-            {controls.rearm ? <button type="button" className="ghost" onClick={() => void onRearm()}>Rearm</button> : null}
             {controls.resolve ? <div className="modal-actions"><button type="button" className="danger" onClick={requestDurableDisable}>Disable guard and open</button><button type="button" className="ghost" onClick={() => void onResolve("retryClosed")}>Keep closed and retry</button></div> : null}
             {canResumeQueue ? <button type="button" className="primary" onClick={onResumeQueuedSends}>Resume queued sends</button> : null}
             <div className="settings-field">

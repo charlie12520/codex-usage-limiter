@@ -11,7 +11,7 @@ import {
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { useQuotaGuardState } from "@/features/quota-guard/hooks/useQuotaGuardState";
-import { quotaGuardControls, quotaGuardPhaseLabel } from "@/features/quota-guard/quotaGuardViewModel";
+import { quotaGuardPhaseLabel } from "@/features/quota-guard/quotaGuardViewModel";
 import {
   addWorkspace,
   getAppSettings,
@@ -304,8 +304,6 @@ export function UsageLimiterApp() {
       ? "healthy"
       : "neutral";
   const snapshotStale = Boolean(activeWindow) && quotaGuard.state?.snapshotFresh === false;
-  const quotaControls = quotaGuardControls(quotaGuard.state);
-
   const floorFromPointer = useCallback((clientX: number) => {
     const rect = barRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0) return null;
@@ -548,11 +546,7 @@ export function UsageLimiterApp() {
                 <span className="limiter-last-checked">
                   {quotaGuard.state?.snapshotFresh ? "Last checked just now" : "Waiting for update"}
                 </span>
-                {quotaControls.rearm ? (
-                  <button type="button" onClick={() => void quotaGuard.rearm()} disabled={busy !== null}>
-                    Rearm
-                  </button>
-                ) : workspaces.length === 0 ? (
+                {workspaces.length === 0 ? (
                   <button type="button" onClick={() => void connectWorkspace()} disabled={busy !== null}>
                     <FolderOpen /> Connect
                   </button>
