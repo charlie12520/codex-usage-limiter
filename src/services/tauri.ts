@@ -869,6 +869,10 @@ export async function getAppSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("get_app_settings");
 }
 
+export async function getLimiterBootScreen(): Promise<"monitor" | "settings" | null> {
+  return invoke<"monitor" | "settings" | null>("get_limiter_boot_screen");
+}
+
 export async function isMobileRuntime(): Promise<boolean> {
   return invoke<boolean>("is_mobile_runtime");
 }

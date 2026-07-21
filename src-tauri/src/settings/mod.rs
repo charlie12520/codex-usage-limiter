@@ -12,6 +12,21 @@ use crate::types::{AppSettings, BackendMode};
 use crate::window;
 use crate::shared::quota_guard::coordinator::{QuotaGuardHandle, SettingsChanged};
 
+fn limiter_boot_screen(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        Some("monitor") => Some("monitor"),
+        Some("settings") => Some("settings"),
+        _ => None,
+    }
+}
+
+/// Returns the one-shot development screen override, if configured at process launch.
+#[tauri::command]
+pub(crate) fn get_limiter_boot_screen() -> Option<String> {
+    limiter_boot_screen(std::env::var("CODEX_LIMITER_BOOT_SCREEN").ok().as_deref())
+        .map(str::to_owned)
+}
+
 #[tauri::command]
 pub(crate) async fn get_app_settings(
     state: State<'_, AppState>,
@@ -593,5 +608,19 @@ mod tests {
         assert!(validate_quota_guard_settings(&settings).is_err());
         settings.quota_guard.reset_grace_minutes = 1440;
         assert!(validate_quota_guard_settings(&settings).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod limiter_boot_screen_tests {
+    use super::limiter_boot_screen;
+
+    #[test]
+    fn accepts_only_known_limiter_screens() {
+        assert_eq!(limiter_boot_screen(Some("monitor")), Some("monitor"));
+        assert_eq!(limiter_boot_screen(Some("settings")), Some("settings"));
+        assert_eq!(limiter_boot_screen(Some("Settings")), None);
+        assert_eq!(limiter_boot_screen(Some("other")), None);
+        assert_eq!(limiter_boot_screen(None), None);
     }
 }

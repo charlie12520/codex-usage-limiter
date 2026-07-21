@@ -68,6 +68,8 @@ For development with hot reload:
 npm run tauri:dev:win
 ```
 
+Set `CODEX_LIMITER_BOOT_SCREEN=settings` (or `monitor`) before launch to open that screen for a single development session; invalid or unset values use the default and are never persisted.
+
 Verification:
 
 ```bash

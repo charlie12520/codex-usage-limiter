@@ -6,6 +6,7 @@ import { useQuotaGuardState } from "@/features/quota-guard/hooks/useQuotaGuardSt
 import {
   getAppSettings,
   getAutostart,
+  getLimiterBootScreen,
   listWorkspaces,
   setAutostart,
   setTrayUsageTooltip,
@@ -45,6 +46,7 @@ vi.mock("@/services/tauri", () => ({
   addWorkspace: vi.fn(),
   getAppSettings: vi.fn(),
   getAutostart: vi.fn(),
+  getLimiterBootScreen: vi.fn(),
   listWorkspaces: vi.fn(),
   pickWorkspacePath: vi.fn(),
   setAutostart: vi.fn(),
@@ -103,6 +105,7 @@ beforeEach(() => {
   localStorage.setItem("codex-usage-limiter.windowMode", "compact");
   vi.mocked(getAppSettings).mockResolvedValue(appSettings);
   vi.mocked(getAutostart).mockResolvedValue(false);
+  vi.mocked(getLimiterBootScreen).mockResolvedValue(null);
   vi.mocked(setAutostart).mockResolvedValue(undefined);
   vi.mocked(setTrayUsageTooltip).mockResolvedValue(undefined);
   vi.mocked(listWorkspaces).mockResolvedValue([workspace]);
@@ -120,6 +123,24 @@ beforeEach(() => {
 });
 
 describe("UsageLimiterApp", () => {
+  it("opens the requested valid boot screen once without persisting it", async () => {
+    vi.mocked(getLimiterBootScreen).mockResolvedValue("settings");
+    render(<UsageLimiterApp />);
+
+    await screen.findByRole("heading", { name: "When reached" });
+    expect(document.querySelector("main")?.dataset.screen).toBe("settings");
+    expect(getLimiterBootScreen).toHaveBeenCalledOnce();
+    expect(updateAppSettings).not.toHaveBeenCalled();
+  });
+
+  it("ignores an invalid boot-screen response", async () => {
+    vi.mocked(getLimiterBootScreen).mockResolvedValue("invalid" as never);
+    render(<UsageLimiterApp />);
+
+    await screen.findByRole("heading", { name: "Current usage" });
+    expect(document.querySelector("main")?.dataset.screen).toBe("monitor");
+  });
+
   it("defaults fresh installs to the pill window", async () => {
     localStorage.removeItem("codex-usage-limiter.windowMode");
     render(<UsageLimiterApp />);

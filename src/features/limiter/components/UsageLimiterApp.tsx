@@ -15,6 +15,7 @@ import {
   addWorkspace,
   getAppSettings,
   getAutostart,
+  getLimiterBootScreen,
   listWorkspaces,
   pickWorkspacePath,
   setAutostart,
@@ -175,6 +176,7 @@ export function UsageLimiterApp() {
   const barRef = useRef<HTMLDivElement | null>(null);
   const dragValue = useRef<number | null>(null);
   const rearmDebounce = useRef<number | null>(null);
+  const bootScreenApplied = useRef(false);
 
   const load = useCallback(async () => {
     setBusy("load");
@@ -194,6 +196,16 @@ export function UsageLimiterApp() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (bootScreenApplied.current) return;
+    bootScreenApplied.current = true;
+    void getLimiterBootScreen()
+      .then((bootScreen) => {
+        if (bootScreen === "monitor" || bootScreen === "settings") setScreen(bootScreen);
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     getAutostart()

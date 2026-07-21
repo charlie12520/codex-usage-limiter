@@ -198,6 +198,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             settings::get_app_settings,
+            settings::get_limiter_boot_screen,
             settings::update_app_settings,
             settings::get_codex_config_path,
             quota_guard_runtime::quota_guard_get_state,
