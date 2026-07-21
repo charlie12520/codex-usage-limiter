@@ -650,7 +650,7 @@ select:disabled {
   width: 20px;
   height: 20px;
   stroke-width: 1.8;
-  color: var(--accent);
+  color: var(--muted);
 }
 
 .limiter-pill__mid {
@@ -835,15 +835,8 @@ select:disabled {
 }
 
 .limiter-settings-row--threshold {
-  min-height: 76px;
-  padding: 10px 0 8px;
-}
-
-.limiter-setting-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
+  min-height: 64px;
+  padding: 8px 0;
 }
 
 .limiter-percent-input {
@@ -852,6 +845,11 @@ select:disabled {
   gap: 1px;
   font-size: 15px;
   font-weight: 600;
+}
+
+.limiter-percent-input--threshold {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .limiter-percent-input input {
@@ -875,7 +873,7 @@ select:disabled {
   --range-progress: 90%;
   width: 100%;
   height: 18px;
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   padding: 0;
   border: 0;
   outline-offset: 2px;

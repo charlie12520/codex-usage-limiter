@@ -106,6 +106,7 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.setItem("codex-usage-limiter.windowMode", "compact");
   vi.mocked(getAppSettings).mockResolvedValue(appSettings);
   vi.mocked(getAutostart).mockResolvedValue(false);
   vi.mocked(setAutostart).mockResolvedValue(undefined);
@@ -126,6 +127,15 @@ beforeEach(() => {
 });
 
 describe("UsageLimiterApp", () => {
+  it("defaults fresh installs to the pill window", async () => {
+    localStorage.removeItem("codex-usage-limiter.windowMode");
+    render(<UsageLimiterApp />);
+
+    await screen.findByRole("button", { name: "Open settings" });
+    expect(document.querySelector("main")?.dataset.mode).toBe("pill");
+    expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("pill");
+  });
+
   it("projects monitoring, usage, threshold, response, and workspace in the compact dashboard", async () => {
     render(<UsageLimiterApp />);
 
@@ -177,6 +187,7 @@ describe("UsageLimiterApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(screen.getByText("Settings")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Trigger response below" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {

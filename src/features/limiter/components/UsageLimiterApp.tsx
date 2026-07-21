@@ -126,7 +126,7 @@ function moreUsedWindow(
 
 function loadWindowMode(): WindowMode {
   const stored = localStorage.getItem(WINDOW_MODE_KEY);
-  return stored === "mini" || stored === "pill" ? stored : "compact";
+  return stored === "compact" || stored === "mini" ? stored : "pill";
 }
 
 export function UsageLimiterApp() {
@@ -620,21 +620,18 @@ export function UsageLimiterApp() {
         <div className="limiter-page limiter-settings-page">
           <div className="limiter-settings-content">
             <section className="limiter-settings-row limiter-settings-row--threshold">
-              <div className="limiter-setting-heading">
-                <h2>Trigger response below</h2>
-                <label className="limiter-percent-input">
-                  <input
-                    type="number"
-                    min={1}
-                    max={99}
-                    disabled={busy === "save"}
-                    value={floor}
-                    aria-label="Trigger percentage"
-                    onChange={(event) => setDraftFloor(Number(event.target.value))}
-                  />
-                  <span>% left</span>
-                </label>
-              </div>
+              <label className="limiter-percent-input limiter-percent-input--threshold">
+                <input
+                  type="number"
+                  min={1}
+                  max={99}
+                  disabled={busy === "save"}
+                  value={floor}
+                  aria-label="Trigger percentage"
+                  onChange={(event) => setDraftFloor(Number(event.target.value))}
+                />
+                <span>% left</span>
+              </label>
               <input
                 className="limiter-threshold-range"
                 type="range"
@@ -643,7 +640,6 @@ export function UsageLimiterApp() {
                 disabled={busy === "save"}
                 value={floor}
                 style={{ "--range-progress": `${floor}%` } as CSSProperties}
-                aria-label="Trigger response below"
                 onChange={(event) => setDraftFloor(Number(event.target.value))}
               />
             </section>
