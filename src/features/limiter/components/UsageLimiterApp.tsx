@@ -550,7 +550,7 @@ export function UsageLimiterApp() {
               </div>
               {usageBar}
               <div className="limiter-action-row">
-                <span>Below {floor}%</span>
+                <span>At {floor}%</span>
                 <label>
                   <span className="sr-only">When limit is reached</span>
                   <select
@@ -593,7 +593,7 @@ export function UsageLimiterApp() {
                 <span className={`limiter-status limiter-status--${statusTone}`}>
                   <span aria-hidden="true" />
                 </span>
-                <em>below {floor}%: {currentAction.shortLabel.toLowerCase()}</em>
+                <em>at {floor}%: {currentAction.shortLabel.toLowerCase()}</em>
               </div>
             </>
           ) : null}

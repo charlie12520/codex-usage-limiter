@@ -1,6 +1,6 @@
 # Codex Usage Limiter
 
-Codex Usage Limiter is an unofficial Windows desktop utility that watches the signed-in Codex account's rate limits and applies a chosen response when your remaining quota drops below a floor you set.
+Codex Usage Limiter is an unofficial Windows desktop utility that watches the signed-in Codex account's rate limits and applies a chosen response when your remaining quota reaches or drops below a floor you set.
 
 It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMonitor). The upstream copyright and MIT license are retained. This project is not affiliated with or endorsed by OpenAI.
 
@@ -9,7 +9,7 @@ It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMo
 ## What it does
 
 - Polls the primary and secondary rate-limit windows from the local Codex app-server (immediately on launch, then every 10 seconds) and shows the window closer to running out as one **% remaining** figure with its reset countdown.
-- Lets you drag a grabber along the usage bar to set the floor — the bar turns red once remaining quota falls below it.
+- Lets you drag a grabber along the usage bar to set the floor — the bar turns red once remaining quota reaches or falls below it.
 - Fires one of three responses when remaining quota crosses the floor:
   - **Notify only** — show a native Windows notification and keep working.
   - **Finish current turn** — block new inference, let turns active at the crossing finish, then pause.

@@ -133,7 +133,7 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByText("Monitoring")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "Current Codex usage" }).getAttribute("aria-valuenow")).toBe("37");
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
-    expect(screen.getByText("Below 10%")).toBeTruthy();
+    expect(screen.getByText("At 10%")).toBeTruthy();
     expect(screen.getByText("Last checked just now")).toBeTruthy();
   });
 
@@ -234,7 +234,7 @@ describe("UsageLimiterApp", () => {
 
     expect(updateAppSettings).not.toHaveBeenCalled();
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
-    expect(screen.getByText("Below 10%")).toBeTruthy();
+    expect(screen.getByText("At 10%")).toBeTruthy();
   });
 
   it("keeps settings open and restores persisted values when save fails", async () => {
