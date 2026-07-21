@@ -378,7 +378,7 @@ select:disabled {
 
 .limiter-progress {
   --progress: 0%;
-  --threshold: 90%;
+  --threshold-position: 90%;
   position: relative;
   align-self: stretch;
   height: 12px;
@@ -412,12 +412,14 @@ select:disabled {
 }
 
 .limiter-progress__handle {
+  --handle-width: 12px;
+  --handle-height: 20px;
   position: absolute;
-  top: -5px;
-  bottom: -5px;
-  left: var(--threshold);
-  width: 12px;
-  transform: translateX(-50%);
+  top: 50%;
+  left: var(--threshold-position);
+  width: var(--handle-width);
+  height: var(--handle-height);
+  transform: translate(-50%, -50%);
   cursor: grab;
   touch-action: none;
   z-index: 2;
@@ -438,7 +440,8 @@ select:disabled {
 
 .limiter-progress__knob {
   position: absolute;
-  inset: 0;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -452,7 +455,7 @@ select:disabled {
 .limiter-progress__knob::before,
 .limiter-progress__knob::after {
   content: "";
-  width: 1.5px;
+  width: 2px;
   height: 7px;
   border-radius: 1px;
   background: var(--border-strong);
@@ -479,7 +482,6 @@ select:disabled {
 .limiter-progress.is-disarmed .limiter-progress__knob {
   border-color: var(--border-strong);
   background: var(--surface-soft);
-  box-shadow: none;
 }
 
 .limiter-progress.is-disarmed .limiter-progress__knob::before,
@@ -716,9 +718,8 @@ select:disabled {
 }
 
 [data-mode="pill"] .limiter-progress__handle {
-  top: -4px;
-  bottom: -4px;
-  width: 10px;
+  --handle-width: 10px;
+  --handle-height: 16px;
 }
 
 [data-mode="pill"] .limiter-progress__handle small {
@@ -801,195 +802,165 @@ select:disabled {
   height: 14px;
 }
 
-/* ---------- Settings ---------- */
-
+/* ---------- Settings sheet ---------- */
 .limiter-settings-page {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) 52px;
+  grid-template-rows: minmax(0, 1fr) 48px;
   overflow: hidden;
   background: var(--surface);
 }
 
 .limiter-settings-content {
   min-height: 0;
-  padding: 2px 18px 0;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 5px 12px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
 }
 
-.limiter-settings-row {
-  border-bottom: 1px solid var(--border);
+.limiter-settings-card {
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
 }
 
-.limiter-settings-row:last-of-type {
-  border-bottom: 0;
+.limiter-settings-card__heading {
+  margin-bottom: 4px;
 }
 
-.limiter-settings-row h1,
-.limiter-settings-row h2,
-.limiter-settings-row p {
+.limiter-settings-card__heading h2 {
   margin: 0;
-}
-
-.limiter-settings-row h1,
-.limiter-settings-row h2 {
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.limiter-settings-row p {
-  margin-top: 3px;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.limiter-settings-row--toggle {
-  min-height: 58px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.limiter-settings-row--toggle .limiter-enabled-control {
-  flex: 0 0 auto;
-}
-
-.limiter-settings-row--threshold {
-  min-height: 64px;
-  padding: 8px 0;
-}
-
-.limiter-percent-input {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 1px;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.limiter-percent-input--threshold {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.limiter-percent-input input {
-  width: 40px;
-  padding: 0;
-  border: 0;
-  outline-offset: 1px;
-  background: transparent;
-  color: inherit;
-  text-align: right;
-  appearance: textfield;
-}
-
-.limiter-percent-input input::-webkit-inner-spin-button,
-.limiter-percent-input input::-webkit-outer-spin-button {
-  appearance: none;
-  margin: 0;
-}
-
-.limiter-threshold-range {
-  --range-progress: 90%;
-  width: 100%;
-  height: 18px;
-  margin: 6px 0 0;
-  padding: 0;
-  border: 0;
-  outline-offset: 2px;
-  background: transparent;
-  appearance: none;
-  cursor: pointer;
-}
-
-.limiter-threshold-range::-webkit-slider-runnable-track {
-  height: 5px;
-  border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    var(--accent) 0 var(--range-progress),
-    var(--track) var(--range-progress) 100%
-  );
-}
-
-.limiter-threshold-range::-webkit-slider-thumb {
-  width: 18px;
-  height: 18px;
-  margin-top: -6px;
-  border: 2px solid var(--accent);
-  border-radius: 50%;
-  background: var(--surface);
-  appearance: none;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .limiter-settings-row--response {
-  min-height: 98px;
-  padding: 10px 0 8px;
+  min-height: 0;
+}
+
+.limiter-settings-row--response > h2,
+.limiter-settings-row--window > h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.limiter-settings-row--response p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.2;
 }
 
 .limiter-segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-top: 7px;
+  min-width: 0;
+  margin-top: 4px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
   overflow: hidden;
 }
 
-.limiter-segmented button {
+.limiter-segmented button,
+.limiter-appearance-options button {
   min-width: 0;
-  min-height: 32px;
-  padding: 0 8px;
+  border: 0;
   border-right: 1px solid var(--border);
   background: var(--surface);
-  font-size: 12px;
+  color: var(--text);
   cursor: pointer;
 }
 
-.limiter-segmented button:last-child {
+.limiter-segmented button {
+  min-height: 26px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+
+.limiter-segmented button:last-child,
+.limiter-appearance-options button:last-child {
   border-right: 0;
 }
 
-.limiter-segmented button:hover:not(:disabled) {
+.limiter-segmented button:hover:not(:disabled),
+.limiter-appearance-options button:hover:not(:disabled) {
   background: var(--surface-soft);
 }
 
-.limiter-segmented button.is-selected {
+.limiter-segmented button.is-selected,
+.limiter-appearance-options button.is-selected {
   position: relative;
   z-index: 1;
-  color: color-mix(in srgb, var(--text) 90%, var(--accent));
   background: var(--accent-soft);
+  color: var(--text);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-.limiter-settings-row--response p {
-  margin-top: 5px;
+.limiter-rearm-row {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.limiter-rearm-row label {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.limiter-rearm-row input {
+  width: 2.7em;
+  margin: 0 2px;
+  padding: 1px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  outline-offset: 2px;
+}
+
+.limiter-rearm-row input::placeholder {
+  color: var(--muted);
 }
 
 .limiter-settings-row--window {
-  padding: 10px 0 12px;
+  min-width: 0;
 }
 
 .limiter-size-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 9px;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 .limiter-size-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: 9px 6px 7px;
+  gap: 2px;
+  min-width: 0;
+  padding: 4px 2px 3px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
   background: var(--surface);
+  color: var(--text);
   cursor: pointer;
 }
 
@@ -1004,8 +975,8 @@ select:disabled {
 }
 
 .limiter-size-card__pict {
-  height: 24px;
   display: grid;
+  height: 18px;
   place-items: center;
   color: var(--muted);
 }
@@ -1016,110 +987,118 @@ select:disabled {
 
 .limiter-size-card__pict i {
   display: block;
-  border: 1.5px solid currentColor;
+  border: 1px solid currentColor;
   border-radius: 2px;
 }
 
 .limiter-size-card__pict--compact i {
-  width: 36px;
-  height: 20px;
+  width: 30px;
+  height: 16px;
 }
 
 .limiter-size-card__pict--mini i {
-  width: 26px;
-  height: 14px;
+  width: 22px;
+  height: 12px;
 }
 
 .limiter-size-card__pict--pill i {
-  width: 30px;
-  height: 9px;
+  width: 26px;
+  height: 8px;
   border-radius: 5px;
 }
 
 .limiter-size-card b {
-  font-size: 11px;
+  color: var(--text);
+  font-size: 9.5px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .limiter-size-card small {
-  font-size: 9.5px;
   color: var(--muted);
+  font-size: 8px;
   font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
 }
 
-.limiter-settings-row--foreground,
-.limiter-settings-row--workspace {
-  min-height: 56px;
+.limiter-settings-row--foreground {
+  min-height: 33px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  padding: 8px 0;
+  gap: 12px;
+  padding-top: 4px;
 }
 
-.limiter-settings-row--workspace button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.limiter-settings-row--foreground h2,
+.limiter-settings-row--appearance h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.15;
 }
 
-.limiter-settings-row--workspace button svg {
-  width: 13px;
-  height: 13px;
+.limiter-settings-row--foreground p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.15;
 }
 
 .limiter-settings-row--appearance {
-  min-height: 58px;
+  min-height: 30px;
   display: grid;
-  grid-template-columns: 90px minmax(180px, 260px);
+  grid-template-columns: 1fr 128px;
   align-items: center;
-  gap: 18px;
+  gap: 10px;
+  padding-top: 4px;
 }
 
 .limiter-appearance-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  justify-self: end;
+  width: 128px;
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
   overflow: hidden;
 }
 
 .limiter-appearance-options button {
-  min-height: 32px;
-  border-right: 1px solid var(--border);
-  background: var(--surface);
-  font-size: 12px;
-  cursor: pointer;
+  min-height: 24px;
+  font-size: 11px;
 }
 
-.limiter-appearance-options button:last-child {
-  border-right: 0;
+.limiter-settings-row--general .limiter-settings-row--foreground {
+  padding-top: 0;
 }
 
-.limiter-appearance-options button:hover {
-  background: var(--surface-soft);
-}
-
-.limiter-appearance-options button.is-selected {
-  color: color-mix(in srgb, var(--text) 90%, var(--accent));
-  background: var(--accent-soft);
-  box-shadow: inset 0 0 0 1px var(--accent);
+.limiter-settings-disclaimer {
+  margin: 0 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .limiter-settings-footer {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
-  padding: 0 22px;
+  gap: 8px;
+  padding: 0 14px;
   border-top: 1px solid var(--border);
   background: var(--titlebar);
 }
 
 .limiter-button {
-  min-height: 34px;
-  padding: 0 16px;
+  min-height: 30px;
+  padding: 0 13px;
   border-radius: 6px;
+  color: var(--text);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -1135,7 +1114,7 @@ select:disabled {
 }
 
 .limiter-button--primary {
-  min-width: 112px;
+  min-width: 108px;
   border: 1px solid color-mix(in srgb, var(--accent) 80%, var(--text));
   background: var(--accent);
   color: #241a08;
@@ -1148,136 +1127,8 @@ select:disabled {
 .limiter-feedback--inline {
   position: static;
   max-width: none;
-  margin: 8px 0;
+  margin: 0;
   box-shadow: none;
-}
-
-/* The settings view is intentionally a compact, borderless sheet. */
-.limiter-settings-page {
-  grid-template-rows: minmax(0, 1fr) 52px;
-}
-
-.limiter-settings-content {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  padding: 12px 14px 8px;
-  overflow: hidden;
-}
-
-.limiter-settings-card {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-soft);
-}
-
-.limiter-settings-card__heading {
-  margin-bottom: 7px;
-}
-
-.limiter-settings-card__heading h2 {
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.limiter-settings-row--response {
-  min-height: 0;
-}
-
-.limiter-settings-row--response > h2,
-.limiter-settings-row--window > h2 {
-  font-size: 13px;
-}
-
-.limiter-settings-row--response p {
-  margin-top: 5px;
-  font-size: 11px;
-}
-
-.limiter-rearm-row {
-  margin-top: 9px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-.limiter-rearm-row label {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.limiter-rearm-row input {
-  width: 2.8em;
-  margin: 0 2px;
-  padding: 1px 2px;
-  border: 0;
-  border-bottom: 1px solid var(--border-strong);
-  border-radius: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: center;
-  outline-offset: 2px;
-}
-
-.limiter-rearm-row input::placeholder { color: var(--muted); }
-
-.limiter-settings-row--window {
-  padding-bottom: 9px;
-}
-
-.limiter-size-cards {
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.limiter-size-card {
-  gap: 3px;
-  min-width: 0;
-  padding: 6px 3px 5px;
-}
-
-.limiter-size-card__pict { height: 22px; }
-.limiter-size-card b { font-size: 10px; line-height: 1; white-space: nowrap; }
-.limiter-size-card small { font-size: 8.5px; line-height: 1; white-space: nowrap; }
-
-.limiter-settings-row--foreground {
-  min-height: 43px;
-  padding: 7px 0 0;
-}
-
-.limiter-settings-row--foreground h2,
-.limiter-settings-row--appearance h2 {
-  font-size: 12px;
-}
-
-.limiter-settings-row--foreground p {
-  font-size: 10px;
-}
-
-.limiter-settings-row--appearance {
-  min-height: 43px;
-  grid-template-columns: 1fr 128px;
-  gap: 10px;
-  padding-top: 7px;
-}
-
-.limiter-appearance-options button { min-height: 27px; }
-
-.limiter-settings-row--general .limiter-settings-row--foreground {
-  padding-top: 0;
-}
-
-.limiter-settings-disclaimer {
-  margin: 0 10px;
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.25;
-  text-align: center;
 }
 
 .limiter-spin {

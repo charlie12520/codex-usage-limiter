@@ -204,6 +204,28 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy();
   });
 
+  it("keeps the complete settings sheet controls inside their cards", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    const limitCard = screen.getByRole("heading", { name: "Limit" }).closest("section");
+    expect(limitCard?.className).toContain("limiter-settings-card");
+    expect(screen.getByRole("heading", { name: "When reached" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Block" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText("Send a notification and keep everything running.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Block" }));
+    expect(screen.getByText("Freeze everything and block new sessions until you switch off.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Block" }).className).toContain("is-selected");
+    expect(screen.getByText(/420/)).toBeTruthy();
+    expect(screen.getByText(/320/)).toBeTruthy();
+    expect(screen.getByText(/280/)).toBeTruthy();
+    expect(screen.getByText(/Interrupt and Block freeze every Codex app instantly/)).toBeTruthy();
+  });
+
   it("disables settings controls while one settings write is pending", async () => {
     let resolveUpdate: (value: AppSettings) => void = () => undefined;
     const pendingUpdate = new Promise<AppSettings>((resolve) => {
@@ -333,9 +355,12 @@ describe("UsageLimiterApp", () => {
     await screen.findByRole("heading", { name: "Current usage" });
 
     const progress = screen.getByRole("progressbar", { name: "Current Codex usage" });
+    Object.defineProperty(progress, "clientWidth", { configurable: true, value: 199 });
     vi.spyOn(progress, "getBoundingClientRect").mockReturnValue({
       x: 0, y: 0, top: 0, left: 0, bottom: 12, right: 200, width: 200, height: 12, toJSON: () => ({}),
     });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(progress.style.getPropertyValue("--threshold-position")).toBe("20px"));
     const handle = screen.getByRole("slider", { name: "Trigger threshold" });
     Object.defineProperty(handle, "setPointerCapture", { value: vi.fn() });
 

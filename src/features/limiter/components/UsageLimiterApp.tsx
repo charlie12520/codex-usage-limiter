@@ -171,6 +171,7 @@ export function UsageLimiterApp() {
   const [autostart, setAutostartState] = useState(false);
   const [draftAutostart, setDraftAutostart] = useState(false);
   const [rearmInput, setRearmInput] = useState("");
+  const [barContentWidth, setBarContentWidth] = useState(0);
   const barRef = useRef<HTMLDivElement | null>(null);
   const dragValue = useRef<number | null>(null);
   const rearmDebounce = useRef<number | null>(null);
@@ -333,7 +334,12 @@ export function UsageLimiterApp() {
     : 90;
   const floor = 100 - usedThreshold;
   const constrainedFloor = useCallback((value: number) => Math.min(clampRemainingFloor(value), remaining), [remaining]);
-  const barStyle = { "--progress": `${remaining}%`, "--threshold": `${floor}%` } as CSSProperties;
+  // Percentage positioning can land on a fractional device pixel. Keep the
+  // grabber centered on an integer inner-track pixel instead.
+  const thresholdPosition = barContentWidth > 0
+    ? `${Math.round((barContentWidth * floor) / 100)}px`
+    : `${floor}%`;
+  const barStyle = { "--progress": `${remaining}%`, "--threshold-position": thresholdPosition } as CSSProperties;
   const currentAction = responseOptions.find((option) => option.value === draft?.action)
     ?? responseOptions[0];
   const phaseLabel = quotaGuard.state
@@ -347,9 +353,30 @@ export function UsageLimiterApp() {
   const snapshotStale = Boolean(activeWindow) && quotaGuard.state?.snapshotFresh === false;
   const floorFromPointer = useCallback((clientX: number) => {
     const rect = barRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0) return null;
-    return constrainedFloor(((clientX - rect.left) / rect.width) * 100);
+    const bar = barRef.current;
+    if (!rect || !bar) return null;
+    // clientWidth is the precise inner track in the app. The rect fallback
+    // keeps pointer math usable in DOM harnesses that do not lay out nodes.
+    const trackWidth = bar.clientWidth || rect.width;
+    if (trackWidth === 0) return null;
+    return constrainedFloor(((clientX - rect.left - bar.clientLeft) / trackWidth) * 100);
   }, [constrainedFloor]);
+
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar) return undefined;
+    const syncBarWidth = () => setBarContentWidth(bar.clientWidth);
+    syncBarWidth();
+    window.addEventListener("resize", syncBarWidth);
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(syncBarWidth);
+    observer?.observe(bar);
+    return () => {
+      window.removeEventListener("resize", syncBarWidth);
+      observer?.disconnect();
+    };
+  }, [draft, screen, windowMode]);
 
   const persistFloor = useCallback((remainingFloor: number) => {
     if (!settings) return;
