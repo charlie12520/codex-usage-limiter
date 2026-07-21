@@ -709,11 +709,10 @@ export function UsageLimiterApp() {
       ) : (
         <div className="limiter-page limiter-settings-page">
           <div className="limiter-settings-content">
-            <section className="limiter-settings-card limiter-settings-row--response">
-              <div className="limiter-settings-card__heading">
-                <h2>Limit</h2>
-              </div>
-              <h2>When reached</h2>
+            <div className="limiter-settings-group">Limit</div>
+            <section className="limiter-settings-card">
+              <div className="limiter-settings-row limiter-settings-row--response">
+                <h2>When reached</h2>
               <div className="limiter-segmented" aria-label="Automatic response">
                 {responseOptions.map((option) => (
                   <button
@@ -729,15 +728,19 @@ export function UsageLimiterApp() {
                 ))}
               </div>
               <p>{currentAction.description}</p>
-              <div className="limiter-rearm-row">
-                <label htmlFor="rearm-after-reset">Rearm after reset at <input id="rearm-after-reset" inputMode="numeric" placeholder="—" value={rearmInput} disabled={busy === "save"} onChange={(event) => changeRearmAfterReset(event.target.value)} />% left</label>
+              </div>
+              <div className="limiter-settings-row limiter-rearm-row">
+                <h2>
+                  <label htmlFor="rearm-after-reset">Rearm after reset at <input id="rearm-after-reset" inputMode="numeric" placeholder="—" value={rearmInput} disabled={busy === "save"} onChange={(event) => changeRearmAfterReset(event.target.value)} />% left</label>
+                </h2>
                 {rearmInput !== "" ? <p>When usage resets, the switch arms itself with the trigger at {clampRemainingFloor(Number(rearmInput))}% left.</p> : null}
               </div>
             </section>
 
-            <section className="limiter-settings-card limiter-settings-row--window">
-              <div className="limiter-settings-card__heading"><h2>Window</h2></div>
-              <h2>Size</h2>
+            <div className="limiter-settings-group">Window</div>
+            <section className="limiter-settings-card">
+              <div className="limiter-settings-row limiter-settings-row--window">
+                <h2>Size</h2>
               <div className="limiter-size-cards" role="group" aria-label="Window size">
                 {windowModeOptions.map((option) => (
                   <button
@@ -753,7 +756,8 @@ export function UsageLimiterApp() {
                   </button>
                 ))}
               </div>
-              <div className="limiter-settings-row--foreground">
+              </div>
+              <div className="limiter-settings-row limiter-settings-row--split">
               <div>
                 <h2>Keep in foreground</h2>
                 <p>Stay above other windows</p>
@@ -770,7 +774,7 @@ export function UsageLimiterApp() {
                 </span>
               </label>
               </div>
-              <div className="limiter-settings-row--appearance">
+              <div className="limiter-settings-row limiter-settings-row--split limiter-settings-row--appearance">
               <h2>Appearance</h2>
               <div className="limiter-appearance-options">
                 <button
@@ -789,9 +793,9 @@ export function UsageLimiterApp() {
               </div>
             </section>
 
-            <section className="limiter-settings-card limiter-settings-row--general">
-              <div className="limiter-settings-card__heading"><h2>General</h2></div>
-              <div className="limiter-settings-row--foreground">
+            <div className="limiter-settings-group">General</div>
+            <section className="limiter-settings-card">
+              <div className="limiter-settings-row limiter-settings-row--split">
                 <div>
                   <h2>Start at login</h2>
                   <p>Launch automatically when you sign in</p>

@@ -178,7 +178,7 @@ describe("UsageLimiterApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(screen.getByText("Codex Usage")).toBeTruthy());
-    expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("mini");
+    await waitFor(() => expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("mini"));
   });
 
   it("stages response and appearance in the rebuilt settings sheet", async () => {
@@ -186,7 +186,7 @@ describe("UsageLimiterApp", () => {
     await screen.findByRole("heading", { name: "Current usage" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(screen.getByRole("heading", { name: "Limit" })).toBeTruthy();
+    expect(screen.getByText("Limit", { selector: ".limiter-settings-group" })).toBeTruthy();
     expect(screen.queryByText("Type a number to turn this on; clear it to turn it off.")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
@@ -204,13 +204,15 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy();
   });
 
-  it("keeps the complete settings sheet controls inside their cards", async () => {
+  it("keeps group labels outside their cards and settings controls inside rows", async () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
-    const limitCard = screen.getByRole("heading", { name: "Limit" }).closest("section");
-    expect(limitCard?.className).toContain("limiter-settings-card");
+    const limitGroup = screen.getByText("Limit", { selector: ".limiter-settings-group" });
+    expect(limitGroup.closest("section")).toBeNull();
+    const limitCard = screen.getByRole("heading", { name: "When reached" }).closest(".limiter-settings-card");
+    expect(limitCard?.tagName).toBe("SECTION");
     expect(screen.getByRole("heading", { name: "When reached" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
@@ -277,7 +279,7 @@ describe("UsageLimiterApp", () => {
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("save rejected"));
     expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
-    expect(screen.getByRole("heading", { name: "Limit" })).toBeTruthy();
+    expect(screen.getByText("Limit", { selector: ".limiter-settings-group" })).toBeTruthy();
   });
 
   it("marks the usage reading as stale when the snapshot is no longer fresh", async () => {

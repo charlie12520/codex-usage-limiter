@@ -1124,6 +1124,256 @@ select:disabled {
   background: var(--accent-hover);
 }
 
+/* Settings sheet: mirrors docs/plans/2026-07-21-settings-mock.html. */
+.limiter-settings-page {
+  grid-template-rows: minmax(0, 1fr) 52px;
+}
+
+.limiter-settings-content {
+  display: block;
+  padding: 14px 18px 4px;
+}
+
+.limiter-settings-group {
+  margin: 14px 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.limiter-settings-group:first-child {
+  margin-top: 2px;
+}
+
+.limiter-settings-card {
+  padding: 0;
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.limiter-settings-row {
+  min-width: 0;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.limiter-settings-card > .limiter-settings-row:last-child {
+  border-bottom: 0;
+}
+
+.limiter-settings-row h2,
+.limiter-rearm-row label {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: normal;
+}
+
+.limiter-settings-row p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.limiter-settings-row--split {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.limiter-segmented,
+.limiter-appearance-options {
+  display: flex;
+  margin-top: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.limiter-segmented button,
+.limiter-appearance-options button {
+  flex: 1;
+  min-height: 0;
+  padding: 7px 0;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.limiter-segmented button:last-child,
+.limiter-appearance-options button:last-child {
+  border-right: 0;
+}
+
+.limiter-segmented button:hover:not(:disabled),
+.limiter-appearance-options button:hover:not(:disabled) {
+  background: var(--surface-soft);
+}
+
+.limiter-segmented button.is-selected,
+.limiter-appearance-options button.is-selected {
+  position: static;
+  background: var(--accent-soft);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.limiter-rearm-row {
+  margin-top: 0;
+  padding-top: 11px;
+  border-top: 0;
+}
+
+.limiter-rearm-row label {
+  display: inline;
+}
+
+.limiter-rearm-row input {
+  width: 44px;
+  margin: 0 2px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font: 600 12.5px inherit;
+  text-align: center;
+}
+
+.limiter-rearm-row input::placeholder {
+  color: var(--muted);
+}
+
+.limiter-settings-row--window h2 {
+  margin: 0;
+}
+
+.limiter-size-cards {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.limiter-size-card {
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 0;
+  padding: 8px 4px 7px;
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.limiter-size-card.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.limiter-size-card__pict {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  margin-bottom: 6px;
+  color: var(--border-strong);
+}
+
+.limiter-size-card.is-selected .limiter-size-card__pict {
+  color: var(--accent);
+}
+
+.limiter-size-card__pict i {
+  border-width: 1.5px;
+  border-color: currentColor;
+  border-radius: 3px;
+  background: var(--surface);
+}
+
+.limiter-size-card__pict--compact i { width: 34px; height: 17px; }
+.limiter-size-card__pict--mini i { width: 26px; height: 12px; }
+.limiter-size-card__pict--pill i { width: 24px; height: 7px; border-radius: 999px; }
+
+.limiter-size-card b {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.limiter-size-card small {
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1;
+}
+
+.limiter-settings-page .reference-switch {
+  width: 38px;
+  height: 22px;
+}
+
+.limiter-settings-page .reference-switch > span::after {
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+}
+
+.limiter-settings-page .reference-switch input:checked + span {
+  border-color: var(--healthy);
+  background: var(--healthy);
+}
+
+.limiter-settings-page .reference-switch input:checked + span::after {
+  transform: translateX(16px);
+}
+
+.limiter-settings-row--appearance .limiter-appearance-options {
+  flex: 0 0 auto;
+  width: 150px;
+  margin-top: 0;
+}
+
+.limiter-settings-disclaimer {
+  margin: 12px 2px 10px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  opacity: 0.85;
+}
+
+.limiter-settings-footer {
+  gap: 10px;
+  padding: 0 16px;
+}
+
+.limiter-button {
+  min-height: 0;
+  padding: 7px 14px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+
+.limiter-button--quiet {
+  border-color: var(--border);
+  background: transparent;
+}
+
+.limiter-button--primary {
+  min-width: 0;
+  padding-right: 16px;
+  padding-left: 16px;
+  border: 0;
+  color: #1e1f20;
+}
+
 .limiter-feedback--inline {
   position: static;
   max-width: none;
