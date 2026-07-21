@@ -179,7 +179,7 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                 Ok(())
             }
             ActorEvent::AppStartupRehydrate => {
-                if let Err(error) = reconcile_startup_external_engines(&handle, &path).await {
+                if let Err(error) = reconcile_startup_external_engines(&handle, &app, &path).await {
                     Err(error)
                 } else {
                     let runtime = handle.runtime().await;
@@ -854,16 +854,42 @@ async fn disable_external_suspension_for_active_episode(handle: &QuotaGuardHandl
     persist_current(handle, path).await
 }
 
-async fn reconcile_startup_external_engines(handle: &QuotaGuardHandle, path: &PathBuf) -> Result<(), String> {
+async fn reconcile_startup_external_engines(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf) -> Result<(), String> {
     let runtime = handle.runtime().await;
     let Some(account) = runtime.account else { return Ok(()) };
-    if account.suspended_external_engines.is_empty() { return Ok(()) }
-    if external_suspension_phase(account.phase) {
+    let plan = external_suspend::startup_reconcile_plan(
+        external_suspension_phase(account.phase),
+        account.episode_policy.as_ref().is_some_and(|policy| policy.external_suspend),
+        account.episode_policy.as_ref().is_some_and(|policy| policy.prevent_new_sessions),
+    );
+    if plan.resuspend_persisted {
         let (live, skipped) = external_suspend::live_entries(&account.suspended_external_engines);
+        // Shutdown intentionally resumes these processes so the app can exit.
+        // A still-active episode must freeze those exact trip-time identities
+        // again on rehydrate even when newcomer prevention is disabled.
+        let resuspended = external_suspend::resuspend(&live);
+        let known = live.iter().map(|entry| (entry.pid, entry.process_start_time)).collect::<HashSet<_>>();
+        let newcomers = if plan.sweep_newcomers {
+            external_suspend::sweep(owned_session_pids(app).await, &known, now_ms())
+        } else {
+            external_suspend::SweepResult::default()
+        };
         let mut next = handle.inner.runtime.lock().await;
-        if let Some(account) = next.account.as_mut() { account.suspended_external_engines = live; }
+        if let Some(account) = next.account.as_mut() {
+            account.suspended_external_engines = live;
+            for engine in &newcomers.suspended {
+                if !account.suspended_external_engines.iter().any(|entry| entry.pid == engine.pid && entry.process_start_time == engine.process_start_time) {
+                    account.suspended_external_engines.push(engine.clone());
+                }
+            }
+        }
         drop(next);
         persist_current(handle, path).await?;
+        push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSkipped, skipped).await?;
+        push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSuspended,
+            resuspended.suspended.iter().chain(newcomers.suspended.iter()).map(|engine| format!("suspended {} ({})", engine.image_path, engine.pid)).collect()).await?;
+        let mut skipped = resuspended.skipped;
+        skipped.extend(newcomers.skipped);
         push_external_activity(handle, path, QuotaGuardActivityKind::ExternalEngineSkipped, skipped).await
     } else {
         resume_external_engines(handle, path).await

@@ -23,6 +23,23 @@ pub(crate) struct ResumeResult {
     pub(crate) skipped: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StartupReconcilePlan {
+    /// Trip-time identities are always frozen again after the shutdown hook
+    /// has released them for the app restart.
+    pub(crate) resuspend_persisted: bool,
+    /// Engines that did not belong to this episode are only discovered when
+    /// the episode explicitly opted into newcomer prevention.
+    pub(crate) sweep_newcomers: bool,
+}
+
+pub(crate) fn startup_reconcile_plan(episode_in_force: bool, external_suspend: bool, prevent_new_sessions: bool) -> StartupReconcilePlan {
+    StartupReconcilePlan {
+        resuspend_persisted: episode_in_force && external_suspend,
+        sweep_newcomers: episode_in_force && external_suspend && prevent_new_sessions,
+    }
+}
+
 fn image_name(path: &str) -> String {
     Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path).to_ascii_lowercase()
 }
@@ -115,6 +132,36 @@ pub(crate) fn resume(entries: &[SuspendedExternalEngine]) -> ResumeResult {
         match resume_process(entry.pid) {
             Ok(()) => result.resumed.push(entry.clone()),
             Err(error) => result.skipped.push(format!("skipped resume {} ({}): {error}", entry.image_path, entry.pid)),
+        }
+    }
+    result
+}
+
+/// Re-applies suspension only to the exact persisted identities. This is used
+/// after the best-effort shutdown resume has allowed the app to exit cleanly.
+/// A PID that has been reused is never touched.
+pub(crate) fn resuspend(entries: &[SuspendedExternalEngine]) -> SweepResult {
+    let processes = match running_processes() {
+        Ok(value) => value.into_iter().map(|process| (process.pid, process)).collect::<HashMap<_, _>>(),
+        Err(error) => return SweepResult { skipped: vec![format!("external engine re-suspend unavailable: {error}")], ..Default::default() },
+    };
+    resuspend_matching_entries(entries, &processes, suspend_process)
+}
+
+fn resuspend_matching_entries(entries: &[SuspendedExternalEngine], processes: &HashMap<u32, ProcessInfo>, mut suspend: impl FnMut(u32) -> Result<(), String>) -> SweepResult {
+    let mut result = SweepResult::default();
+    for entry in entries {
+        let Some(process) = processes.get(&entry.pid) else {
+            result.skipped.push(format!("dropped exited engine {} ({})", entry.image_path, entry.pid));
+            continue;
+        };
+        if process.start_time != entry.process_start_time {
+            result.skipped.push(format!("dropped PID-reused engine {} ({})", entry.image_path, entry.pid));
+            continue;
+        }
+        match suspend(entry.pid) {
+            Ok(()) => result.suspended.push(entry.clone()),
+            Err(error) => result.skipped.push(format!("skipped re-suspend {} ({}): {error}", entry.image_path, entry.pid)),
         }
     }
     result
@@ -284,5 +331,28 @@ mod tests {
         assert!(live.is_empty());
         assert_eq!(skipped.len(), 1);
         assert!(skipped[0].contains("stale"));
+    }
+
+    #[test]
+    fn startup_reconcile_resuspends_trip_time_engines_by_default_without_sweeping_newcomers() {
+        let trip_time = SuspendedExternalEngine { pid: 41, process_start_time: 7, image_path: "codex.exe".into(), suspended_at: 1 };
+        let processes = HashMap::from([
+            (41, ProcessInfo { pid: 41, parent_pid: 1, start_time: 7, image_path: "codex.exe".into() }),
+            (42, ProcessInfo { pid: 42, parent_pid: 1, start_time: 8, image_path: "codex-aarch64-apple-darwin".into() }),
+        ]);
+        let mut suspended = Vec::new();
+        let result = super::resuspend_matching_entries(&[trip_time.clone()], &processes, |pid| { suspended.push(pid); Ok(()) });
+        let plan = super::startup_reconcile_plan(true, true, false);
+        assert!(plan.resuspend_persisted);
+        assert!(!plan.sweep_newcomers);
+        assert_eq!(result.suspended, vec![trip_time]);
+        assert_eq!(suspended, vec![41], "only the persisted trip-time identity is re-suspended");
+    }
+
+    #[test]
+    fn startup_reconcile_sweeps_trip_time_and_newcomer_engines_when_enabled() {
+        let plan = super::startup_reconcile_plan(true, true, true);
+        assert!(plan.resuspend_persisted);
+        assert!(plan.sweep_newcomers);
     }
 }
