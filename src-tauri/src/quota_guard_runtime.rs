@@ -742,7 +742,7 @@ async fn handle_command(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathB
 }
 
 fn external_suspension_phase(phase: QuotaGuardPhase) -> bool {
-    matches!(phase, QuotaGuardPhase::Interrupting | QuotaGuardPhase::AwaitingDrainDecision | QuotaGuardPhase::Draining | QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset)
+    matches!(phase, QuotaGuardPhase::Closing | QuotaGuardPhase::Interrupting | QuotaGuardPhase::AwaitingDrainDecision | QuotaGuardPhase::Draining | QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset)
 }
 
 async fn owned_session_pids(app: &AppHandle) -> HashSet<u32> {
