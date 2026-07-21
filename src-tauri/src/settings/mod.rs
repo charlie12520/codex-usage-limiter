@@ -154,6 +154,9 @@ pub(crate) fn validate_quota_guard_settings(settings: &AppSettings) -> Result<()
     if !(1..=100).contains(&guard.primary_threshold_percent) || !(1..=100).contains(&guard.secondary_threshold_percent) {
         return Err("QUOTA_GUARD_INVALID_THRESHOLD_PERCENT".to_string());
     }
+    if guard.rearm_after_reset_percent_left.is_some_and(|value| !(1..=99).contains(&value)) {
+        return Err("QUOTA_GUARD_INVALID_REARM_PERCENT_LEFT".to_string());
+    }
     if guard.reset_grace_minutes > 1440 {
         return Err("QUOTA_GUARD_INVALID_RESET_GRACE_MINUTES".to_string());
     }

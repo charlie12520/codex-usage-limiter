@@ -84,7 +84,6 @@ const publicState: QuotaGuardPublicState = {
   snapshotFresh: true,
   breachedWindows: [],
   affectedTurns: [],
-  verifyAt: null,
   monitorHealthy: true,
   lastError: null,
   activity: [],
@@ -182,18 +181,15 @@ describe("UsageLimiterApp", () => {
     expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("mini");
   });
 
-  it("stages compact settings and saves response, threshold, and appearance together", async () => {
+  it("stages response and appearance in the rebuilt settings sheet", async () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(screen.getByText("Settings")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Trigger response below" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Limit" })).toBeTruthy();
+    expect(screen.getByText("Type a number to turn this on; clear it to turn it off.")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
-      target: { value: "25" },
-    });
     fireEvent.click(screen.getByRole("button", { name: "Dark" }));
     expect(updateAppSettings).not.toHaveBeenCalled();
 
@@ -202,8 +198,8 @@ describe("UsageLimiterApp", () => {
     await waitFor(() => expect(updateAppSettings).toHaveBeenCalledOnce());
     const updated = vi.mocked(updateAppSettings).mock.calls[0]?.[0].quotaGuard;
     expect(updated.action).toBe("interrupt");
-    expect(updated.primaryThresholdPercent).toBe(75);
-    expect(updated.secondaryThresholdPercent).toBe(75);
+    expect(updated.primaryThresholdPercent).toBe(90);
+    expect(updated.secondaryThresholdPercent).toBe(90);
     await waitFor(() => expect(document.documentElement.dataset.appearance).toBe("dark"));
     expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy();
   });
@@ -238,7 +234,7 @@ describe("UsageLimiterApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Rearm after reset at % left" }), {
       target: { value: "82" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -259,7 +255,7 @@ describe("UsageLimiterApp", () => {
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("save rejected"));
     expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
-    expect(screen.getByText("Settings")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Limit" })).toBeTruthy();
   });
 
   it("marks the usage reading as stale when the snapshot is no longer fresh", async () => {
@@ -280,16 +276,22 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByText("37%").className).toContain("is-stale");
   });
 
-  it("clamps the staged threshold to at least 1 percent when the field is cleared", async () => {
+  it("clears the rearm setting immediately", async () => {
+    vi.mocked(getAppSettings).mockResolvedValue({
+      ...appSettings,
+      quotaGuard: { ...appSettings.quotaGuard, rearmAfterResetPercentLeft: 40 },
+    });
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Rearm after reset at % left" }), {
       target: { value: "" },
     });
-
-    expect((screen.getByRole("spinbutton", { name: "Trigger percentage" }) as HTMLInputElement).value).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateAppSettings).toHaveBeenCalledWith(expect.objectContaining({
+      quotaGuard: expect.objectContaining({ rearmAfterResetPercentLeft: null }),
+    })));
   });
 
   it("restores the persisted armed toggle when its immediate update fails", async () => {

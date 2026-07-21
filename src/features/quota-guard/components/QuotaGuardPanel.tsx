@@ -69,7 +69,6 @@ export function QuotaGuardPanel({
               <div><dt>Account</dt><dd>{state.accountLabel ?? "Not verified"}</dd></div>
               <div><dt>Observed</dt><dd>{state.snapshotFresh ? "Fresh" : "Stale or unavailable"}</dd></div>
               <div><dt>Breaches</dt><dd>{breachedWindows.join(", ") || "None"}</dd></div>
-              <div><dt>Verification</dt><dd>{formatQuotaGuardTimestamp(state.verifyAt)}</dd></div>
               <div><dt>Monitor</dt><dd>{state.monitorHealthy ? "Healthy" : state.lastError ?? "Needs attention"}</dd></div>
             </dl>
             <div className="settings-field">

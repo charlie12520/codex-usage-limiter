@@ -32,6 +32,7 @@ const DEFAULT_QUOTA_GUARD_SETTINGS: AppSettings["quotaGuard"] = {
   enabled: false,
   primaryThresholdPercent: 90,
   secondaryThresholdPercent: 90,
+  rearmAfterResetPercentLeft: null,
   action: "interrupt",
 };
 
@@ -68,6 +69,9 @@ function normalizeQuotaGuardSettings(value: unknown): AppSettings["quotaGuard"] 
       0,
       100,
     ),
+    rearmAfterResetPercentLeft: settings.rearmAfterResetPercentLeft == null
+      ? null
+      : normalizeInteger(settings.rearmAfterResetPercentLeft, 1, 1, 99),
     action: (settings.action as string | undefined) === "notifyOnly"
       ? "notifyOnly"
       : (settings.action as string | undefined) === "block" || ((settings.action as string | undefined) === "interruptImmediately" && settings.preventNewSessions === true)

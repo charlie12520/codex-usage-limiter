@@ -31,16 +31,11 @@ fn parse(path: &Path) -> Result<QuotaGuardRuntimeState, String> {
         .get_mut("account")
         .and_then(serde_json::Value::as_object_mut)
     {
-        account.insert(
-            "phase".into(),
-            serde_json::Value::String("monitoring".into()),
-        );
         for key in [
             "revalidationReturnPhase",
             "episodePolicy",
             "firedEpisodes",
             "breachedWindows",
-            "verifyAt",
             "drainDeadline",
             "allowedDrainTurns",
             "pendingInterruptIndex",

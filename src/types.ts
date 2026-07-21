@@ -247,6 +247,8 @@ export type QuotaGuardSettings = {
   armed?: boolean;
   primaryThresholdPercent: number;
   secondaryThresholdPercent: number;
+  /** Percent remaining at which a new usage window automatically rearms. */
+  rearmAfterResetPercentLeft?: number | null;
   action: QuotaAction;
 };
 

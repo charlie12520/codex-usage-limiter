@@ -4,11 +4,7 @@ import {
   admissionForWorkspace,
   isQuotaGuardBlockedError,
 } from "./quotaGuardTypes";
-import {
-  formatQuotaGuardTimestamp,
-  quotaGuardControls,
-  quotaGuardPhaseSeverity,
-} from "./quotaGuardViewModel";
+import { quotaGuardControls, quotaGuardPhaseSeverity } from "./quotaGuardViewModel";
 
 function state(phase: QuotaGuardPublicState["phase"]): QuotaGuardPublicState {
   return {
@@ -19,7 +15,6 @@ function state(phase: QuotaGuardPublicState["phase"]): QuotaGuardPublicState {
     snapshotFresh: true,
     breachedWindows: ["primary"],
     affectedTurns: [],
-    verifyAt: null,
     monitorHealthy: true,
     lastError: null,
     activity: [],
@@ -34,7 +29,7 @@ describe("quota guard view model", () => {
   });
 
   it("keeps intervention controls constrained to backend phases", () => {
-    expect(quotaGuardControls(state("verifyingReset"))).toMatchObject({
+    expect(quotaGuardControls(state("tripped"))).toMatchObject({
       resolve: false,
     });
     expect(quotaGuardControls(state("interventionRequired"))).toMatchObject({
@@ -43,7 +38,7 @@ describe("quota guard view model", () => {
   });
 
   it("fails closed for missing enabled-workspace admissions while preserving disabled openness", () => {
-    const configuredState = state("parked");
+    const configuredState = state("tripped");
     configuredState.admissionByWorkspace = {
       open: { sessionEpoch: "e1", open: true, reason: "open" },
       disabled: { sessionEpoch: "e2", open: true, reason: "guardDisabled" },
@@ -96,17 +91,16 @@ describe("quota guard view model", () => {
       open: false,
       reason: "workspaceUnbound",
     });
-    expect(formatQuotaGuardTimestamp(undefined)).toBe("Not scheduled");
   });
 
-  it("keeps intervention required ahead of ready in badge severity", () => {
+  it("keeps intervention required ahead of monitoring in badge severity", () => {
     expect(quotaGuardPhaseSeverity("interventionRequired")).toBeLessThan(
-      quotaGuardPhaseSeverity("ready"),
+      quotaGuardPhaseSeverity("monitoring"),
     );
   });
 
   it("recognizes only the stable backend blocked prefix", () => {
-    expect(isQuotaGuardBlockedError("QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1")).toBe(true);
+    expect(isQuotaGuardBlockedError("QUOTA_GUARD_BLOCKED|state=tripped")).toBe(true);
     expect(isQuotaGuardBlockedError("quota guard blocked")).toBe(false);
   });
 });

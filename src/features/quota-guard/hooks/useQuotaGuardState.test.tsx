@@ -30,12 +30,11 @@ function quotaState(open: boolean): QuotaGuardPublicState {
   return {
     accountKey: "account",
     accountLabel: "Account",
-    phase: open ? "ready" : "parked",
+    phase: open ? "monitoring" : "tripped",
     snapshot: null,
     snapshotFresh: true,
     breachedWindows: [],
     affectedTurns: [],
-    verifyAt: null,
     monitorHealthy: true,
     lastError: null,
     activity: [],

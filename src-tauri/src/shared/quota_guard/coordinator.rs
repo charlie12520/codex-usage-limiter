@@ -110,10 +110,6 @@ pub(crate) enum ActorEvent {
     FinalizeClosedEpisode {
         generation: u64,
     },
-    Verify {
-        generation: u64,
-        verify_at: i64,
-    },
     InterruptDeadline {
         turn: super::model::TurnKey,
         generation: u64,
@@ -391,7 +387,6 @@ impl QuotaGuardHarness {
                         None | Some(
                             super::model::QuotaGuardPhase::Disabled
                                 | super::model::QuotaGuardPhase::Monitoring
-                                | super::model::QuotaGuardPhase::Ready
                         )
                     );
                 let reason = if epoch.is_none() {
@@ -621,7 +616,6 @@ pub(crate) struct QuotaGuardPublicState {
     pub(crate) snapshot_fresh: bool,
     pub(crate) breached_windows: Vec<super::model::QuotaWindowKind>,
     pub(crate) affected_turns: Vec<QuotaGuardPublicTurn>,
-    pub(crate) verify_at: Option<i64>,
     pub(crate) monitor_healthy: bool,
     pub(crate) last_error: Option<String>,
     pub(crate) suspended_external_engines: Vec<QuotaGuardPublicSuspendedEngine>,

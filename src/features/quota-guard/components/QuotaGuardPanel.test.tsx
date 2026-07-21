@@ -13,7 +13,6 @@ describe("QuotaGuardPanel", () => {
       accountLabel: null,
       snapshot: null,
       snapshotFresh: false,
-      verifyAt: null,
       monitorHealthy: false,
       lastError: null,
     } as unknown as QuotaGuardPublicState;
@@ -33,7 +32,6 @@ describe("QuotaGuardPanel", () => {
     expect(screen.getByRole("dialog", { name: "Quota guard" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close quota guard" }));
     expect(onClose).toHaveBeenCalledOnce();
-    expect(screen.getAllByText("Not scheduled")).toHaveLength(1);
     expect(screen.getByText("workspace · Open · guardDisabled")).toBeTruthy();
   });
 
@@ -41,12 +39,11 @@ describe("QuotaGuardPanel", () => {
     const state = {
       accountKey: "account",
       accountLabel: "Account",
-      phase: "interrupting",
+      phase: "tripped",
       snapshot: null,
       snapshotFresh: true,
       breachedWindows: ["primary"],
       affectedTurns: [],
-      verifyAt: null,
       monitorHealthy: true,
       lastError: null,
       activity: [],
@@ -88,7 +85,6 @@ describe("QuotaGuardPanel", () => {
       snapshotFresh: false,
       breachedWindows: [],
       affectedTurns: [],
-      verifyAt: null,
       monitorHealthy: false,
       lastError: "Needs reconciliation",
       activity: [],
@@ -138,7 +134,7 @@ describe("QuotaGuardPanel", () => {
     rerender(
       <QuotaGuardPanel
         activeWorkspaceId="workspace"
-        state={{ ...intervention, phase: "parked" }}
+        state={{ ...intervention, phase: "tripped" }}
         queueResumeRequired={false}
         onClose={vi.fn()}
         onApplyActionNow={async () => intervention}

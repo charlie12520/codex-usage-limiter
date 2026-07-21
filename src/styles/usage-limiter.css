@@ -1143,6 +1143,134 @@ select:disabled {
   box-shadow: none;
 }
 
+/* The settings view is intentionally a compact, borderless sheet. */
+.limiter-settings-page {
+  grid-template-rows: minmax(0, 1fr) 52px;
+}
+
+.limiter-settings-content {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px 14px 8px;
+  overflow: hidden;
+}
+
+.limiter-settings-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.limiter-settings-card__heading {
+  margin-bottom: 7px;
+}
+
+.limiter-settings-card__heading h2 {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.limiter-settings-row--response {
+  min-height: 0;
+}
+
+.limiter-settings-row--response > h2,
+.limiter-settings-row--window > h2 {
+  font-size: 13px;
+}
+
+.limiter-settings-row--response p {
+  margin-top: 5px;
+  font-size: 11px;
+}
+
+.limiter-rearm-row {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.limiter-rearm-row label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.limiter-rearm-row input {
+  width: 2.8em;
+  margin: 0 2px;
+  padding: 1px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  outline-offset: 2px;
+}
+
+.limiter-rearm-row input::placeholder { color: var(--muted); }
+
+.limiter-settings-row--window {
+  padding-bottom: 9px;
+}
+
+.limiter-size-cards {
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.limiter-size-card {
+  gap: 3px;
+  min-width: 0;
+  padding: 6px 3px 5px;
+}
+
+.limiter-size-card__pict { height: 22px; }
+.limiter-size-card b { font-size: 10px; line-height: 1; white-space: nowrap; }
+.limiter-size-card small { font-size: 8.5px; line-height: 1; white-space: nowrap; }
+
+.limiter-settings-row--foreground {
+  min-height: 43px;
+  padding: 7px 0 0;
+}
+
+.limiter-settings-row--foreground h2,
+.limiter-settings-row--appearance h2 {
+  font-size: 12px;
+}
+
+.limiter-settings-row--foreground p {
+  font-size: 10px;
+}
+
+.limiter-settings-row--appearance {
+  min-height: 43px;
+  grid-template-columns: 1fr 128px;
+  gap: 10px;
+  padding-top: 7px;
+}
+
+.limiter-appearance-options button { min-height: 27px; }
+
+.limiter-settings-row--general .limiter-settings-row--foreground {
+  padding-top: 0;
+}
+
+.limiter-settings-disclaimer {
+  margin: 0 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.25;
+  text-align: center;
+}
+
 .limiter-spin {
   animation: limiter-spin 850ms linear infinite;
 }

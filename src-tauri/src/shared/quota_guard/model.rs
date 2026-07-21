@@ -1,20 +1,39 @@
 pub(crate) use crate::types::QuotaAction;
 use crate::types::QuotaGuardSettings;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum QuotaGuardPhase {
     Disabled,
     Monitoring,
     Tripped,
     InterventionRequired,
-    RevalidatingIdentity,
-    Interrupting,
-    Parked,
-    VerifyingReset,
-    Ready,
+}
+
+/// Persisted states from the reset-verification era are intentionally mapped
+/// once at load time; runtime code only works with the current phases.
+impl<'de> Deserialize<'de> for QuotaGuardPhase {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "monitoring" | "ready" | "revalidatingIdentity" => Ok(Self::Monitoring),
+            "tripped" | "interrupting" | "parked" | "verifyingReset" => Ok(Self::Tripped),
+            "interventionRequired" => Ok(Self::InterventionRequired),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &[
+                    "disabled", "monitoring", "tripped", "interventionRequired",
+                    "ready", "revalidatingIdentity", "interrupting", "parked", "verifyingReset",
+                ],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -198,8 +217,6 @@ pub(crate) struct AccountRuntime {
     pub(crate) last_error: Option<String>,
     pub(crate) updated_at: i64,
     #[serde(skip)]
-    pub(crate) revalidation_return_phase: Option<QuotaGuardPhase>,
-    #[serde(skip)]
     pub(crate) breached_windows: std::collections::BTreeSet<QuotaWindowKind>,
     #[serde(skip)]
     pub(crate) fired_episodes: std::collections::BTreeSet<EpisodeKey>,
@@ -213,8 +230,8 @@ pub(crate) struct AccountRuntime {
     pub(crate) terminal_observations: Vec<TerminalObservation>,
     #[serde(skip)]
     pub(crate) pending_interrupt_index: BTreeMap<String, PendingInterrupt>,
-    #[serde(skip)]
-    pub(crate) verify_at: Option<i64>,
+    #[serde(default)]
+    pub(crate) fire_at_or_above_on_next_snapshot: bool,
 }
 impl AccountRuntime {
     pub(crate) fn new(account_key: String, now_ms: i64) -> Self {
@@ -229,7 +246,6 @@ impl AccountRuntime {
             monitor_healthy: true,
             last_error: None,
             updated_at: now_ms,
-            revalidation_return_phase: None,
             breached_windows: Default::default(),
             fired_episodes: Default::default(),
             episode_policy: None,
@@ -237,7 +253,7 @@ impl AccountRuntime {
             unmatched_started_turns: vec![],
             terminal_observations: vec![],
             pending_interrupt_index: Default::default(),
-            verify_at: None,
+            fire_at_or_above_on_next_snapshot: false,
         }
     }
     pub(crate) fn push_activity(&mut self, activity: QuotaGuardActivityEntry) {
@@ -299,5 +315,18 @@ impl Default for QuotaGuardRuntimeState {
             effective_settings: None,
             pending_thresholds: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod phase_deserialization_tests {
+    use super::QuotaGuardPhase;
+
+    #[test]
+    fn legacy_persisted_phases_map_to_current_phases() {
+        let healthy: QuotaGuardPhase = serde_json::from_str("\"ready\"").unwrap();
+        let frozen: QuotaGuardPhase = serde_json::from_str("\"parked\"").unwrap();
+        assert_eq!(healthy, QuotaGuardPhase::Monitoring);
+        assert_eq!(frozen, QuotaGuardPhase::Tripped);
     }
 }

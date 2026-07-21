@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
-  ArrowLeft,
   FolderOpen,
   Minus,
   RefreshCw,
@@ -46,7 +45,7 @@ const MODE_WINDOWS: Record<WindowMode, { width: number; height: number; minWidth
   mini: { width: 320, height: 144, minWidth: 320, minHeight: 144, resizable: false },
   pill: { width: 280, height: 72, minWidth: 280, minHeight: 72, resizable: false },
 };
-const SETTINGS_WINDOW = { width: 420, height: 560, minWidth: 420, minHeight: 560, resizable: false };
+const SETTINGS_WINDOW = { width: 420, height: 470, minWidth: 420, minHeight: 470, resizable: false };
 
 const windowModeOptions: Array<{ value: WindowMode; label: string; dims: string }> = [
   { value: "compact", label: "Compact", dims: "420 × 204" },
@@ -63,8 +62,8 @@ const responseOptions: Array<{
   {
     value: "notifyOnly",
     shortLabel: "Notify",
-    title: "Notify only",
-    description: "Show an alert and keep working.",
+    title: "Notify",
+    description: "Send a notification and keep everything running.",
   },
   {
     value: "interrupt",
@@ -150,8 +149,10 @@ export function UsageLimiterApp() {
   const [draftAlwaysOnTop, setDraftAlwaysOnTop] = useState<boolean>(alwaysOnTop);
   const [autostart, setAutostartState] = useState(false);
   const [draftAutostart, setDraftAutostart] = useState(false);
+  const [rearmInput, setRearmInput] = useState("");
   const barRef = useRef<HTMLDivElement | null>(null);
   const dragValue = useRef<number | null>(null);
+  const rearmDebounce = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     setBusy("load");
@@ -203,7 +204,7 @@ export function UsageLimiterApp() {
         if (IS_MAC) {
           // Pill has no titlebar; hide the traffic lights with it. Windows and
           // Linux are already borderless via config, so never touch them here.
-          await appWindow.setDecorations(screen === "settings" || windowMode !== "pill");
+          await appWindow.setDecorations(screen !== "settings" && windowMode !== "pill");
         }
         await appWindow.setResizable(screen === "monitor" && target.resizable);
         await appWindow.setMinSize(new LogicalSize(target.minWidth, target.minHeight));
@@ -301,7 +302,7 @@ export function UsageLimiterApp() {
     : settings?.quotaGuard.enabled ? "Connecting" : "Disabled";
   const statusTone = quotaGuard.state?.monitorHealthy === false || error
     ? "danger"
-    : quotaGuard.state?.phase === "monitoring" || quotaGuard.state?.phase === "ready"
+    : quotaGuard.state?.phase === "monitoring"
       ? "healthy"
       : "neutral";
   const snapshotStale = Boolean(activeWindow) && quotaGuard.state?.snapshotFresh === false;
@@ -361,6 +362,19 @@ export function UsageLimiterApp() {
     persistPatch({ primaryThresholdPercent: used, secondaryThresholdPercent: used });
   }, [draft?.armed, persistPatch, setDraftFloor, used, usedThreshold]);
 
+  useEffect(() => () => {
+    if (rearmDebounce.current !== null) window.clearTimeout(rearmDebounce.current);
+  }, []);
+
+  useEffect(() => {
+    if (screen !== "settings") return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") cancelSettings();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [screen, settings, appearance, windowMode, alwaysOnTop, autostart]);
+
   useEffect(() => {
     const tooltip = activeWindow
       ? `${remaining}% left · ${formatResetShort(activeWindow.resetsAt)}`
@@ -385,16 +399,19 @@ export function UsageLimiterApp() {
     setDraftWindowMode(windowMode);
     setDraftAlwaysOnTop(alwaysOnTop);
     setDraftAutostart(autostart);
+    setRearmInput(settings.quotaGuard.rearmAfterResetPercentLeft?.toString() ?? "");
     setError(null);
     setNotice(null);
     setScreen("settings");
   };
   const cancelSettings = () => {
+    if (rearmDebounce.current !== null) window.clearTimeout(rearmDebounce.current);
     setDraft(settings.quotaGuard);
     setDraftAppearance(appearance);
     setDraftWindowMode(windowMode);
     setDraftAlwaysOnTop(alwaysOnTop);
     setDraftAutostart(autostart);
+    setRearmInput(settings.quotaGuard.rearmAfterResetPercentLeft?.toString() ?? "");
     setError(null);
     setScreen("monitor");
   };
@@ -414,6 +431,21 @@ export function UsageLimiterApp() {
       }
     }
     setScreen("monitor");
+  };
+
+  const changeRearmAfterReset = (rawValue: string) => {
+    const value = rawValue.replace(/\D/g, "").slice(0, 3);
+    setRearmInput(value);
+    if (rearmDebounce.current !== null) window.clearTimeout(rearmDebounce.current);
+    if (value === "") {
+      setDraft((current) => current ? { ...current, rearmAfterResetPercentLeft: null } : current);
+      return;
+    }
+    rearmDebounce.current = window.setTimeout(() => {
+      const percentLeft = clampRemainingFloor(Number(value));
+      setDraft((current) => current ? { ...current, rearmAfterResetPercentLeft: percentLeft } : current);
+      rearmDebounce.current = null;
+    }, 10_000);
   };
 
   const armed = draft.armed !== false;
@@ -480,28 +512,19 @@ export function UsageLimiterApp() {
     ? snapshotStale ? "stale reading" : formatResetShort(activeWindow.resetsAt)
     : "no data yet";
 
-  const showTitlebar = screen === "settings" || windowMode !== "pill";
+  const showTitlebar = screen === "monitor" && windowMode !== "pill";
 
   return (
     <main className="limiter-window" data-mode={windowMode} data-screen={screen} data-platform={IS_MAC ? "mac" : "other"}>
       {showTitlebar ? (
         <header className="limiter-titlebar" data-tauri-drag-region>
           <div className="limiter-titlebar__brand" data-tauri-drag-region>
-            {screen === "monitor" ? (
-              <>
-                <Shield aria-hidden="true" />
-                <span data-tauri-drag-region>
-                  {windowMode === "mini" ? "Codex Usage" : "Codex Usage Limiter"}
-                </span>
-              </>
-            ) : (
-              <>
-                <button type="button" className="limiter-back" aria-label="Back to usage" onClick={cancelSettings}>
-                  <ArrowLeft />
-                </button>
-                <span data-tauri-drag-region>Settings</span>
-              </>
-            )}
+            <>
+              <Shield aria-hidden="true" />
+              <span data-tauri-drag-region>
+                {windowMode === "mini" ? "Codex Usage" : "Codex Usage Limiter"}
+              </span>
+            </>
           </div>
           <div className="limiter-titlebar__actions">
             {screen === "monitor" ? armedSwitch : null}
@@ -620,32 +643,10 @@ export function UsageLimiterApp() {
       ) : (
         <div className="limiter-page limiter-settings-page">
           <div className="limiter-settings-content">
-            <section className="limiter-settings-row limiter-settings-row--threshold">
-              <label className="limiter-percent-input limiter-percent-input--threshold">
-                <input
-                  type="number"
-                  min={1}
-                  max={remaining}
-                  disabled={busy === "save"}
-                  value={floor}
-                  aria-label="Trigger percentage"
-                  onChange={(event) => setDraftFloor(constrainedFloor(Number(event.target.value)))}
-                />
-                <span>% left</span>
-              </label>
-              <input
-                className="limiter-threshold-range"
-                type="range"
-                min={1}
-                max={remaining}
-                disabled={busy === "save"}
-                value={floor}
-                style={{ "--range-progress": `${floor}%` } as CSSProperties}
-                onChange={(event) => setDraftFloor(constrainedFloor(Number(event.target.value)))}
-              />
-            </section>
-
-            <section className="limiter-settings-row limiter-settings-row--response">
+            <section className="limiter-settings-card limiter-settings-row--response">
+              <div className="limiter-settings-card__heading">
+                <h2>Limit</h2>
+              </div>
               <h2>When reached</h2>
               <div className="limiter-segmented" aria-label="Automatic response">
                 {responseOptions.map((option) => (
@@ -662,11 +663,15 @@ export function UsageLimiterApp() {
                 ))}
               </div>
               <p>{currentAction.description}</p>
-              <p className="limiter-settings-disclaimer">Interrupt and Block freeze every Codex app instantly, but a reply already generating on the server still finishes and counts toward usage.</p>
+              <div className="limiter-rearm-row">
+                <label htmlFor="rearm-after-reset">Rearm after reset at <input id="rearm-after-reset" inputMode="numeric" placeholder="—" value={rearmInput} disabled={busy === "save"} onChange={(event) => changeRearmAfterReset(event.target.value)} />% left</label>
+                <p>{rearmInput === "" ? "Type a number to turn this on; clear it to turn it off." : `When usage resets, the switch arms itself with the trigger at ${clampRemainingFloor(Number(rearmInput))}% left.`}</p>
+              </div>
             </section>
 
-            <section className="limiter-settings-row limiter-settings-row--window">
-              <h2>Window size</h2>
+            <section className="limiter-settings-card limiter-settings-row--window">
+              <div className="limiter-settings-card__heading"><h2>Window</h2></div>
+              <h2>Size</h2>
               <div className="limiter-size-cards" role="group" aria-label="Window size">
                 {windowModeOptions.map((option) => (
                   <button
@@ -682,9 +687,7 @@ export function UsageLimiterApp() {
                   </button>
                 ))}
               </div>
-            </section>
-
-            <section className="limiter-settings-row limiter-settings-row--foreground">
+              <div className="limiter-settings-row--foreground">
               <div>
                 <h2>Keep in foreground</h2>
                 <p>Stay above other windows</p>
@@ -700,27 +703,8 @@ export function UsageLimiterApp() {
                   <span aria-hidden="true" />
                 </span>
               </label>
-            </section>
-
-            <section className="limiter-settings-row limiter-settings-row--foreground">
-              <div>
-                <h2>Start at login</h2>
-                <p>Launch automatically when you sign in</p>
               </div>
-              <label className="limiter-enabled-control">
-                <span className="reference-switch">
-                  <input
-                    type="checkbox"
-                    checked={draftAutostart}
-                    onChange={(event) => setDraftAutostart(event.target.checked)}
-                    aria-label="Start at login"
-                  />
-                  <span aria-hidden="true" />
-                </span>
-              </label>
-            </section>
-
-            <section className="limiter-settings-row limiter-settings-row--appearance">
+              <div className="limiter-settings-row--appearance">
               <h2>Appearance</h2>
               <div className="limiter-appearance-options">
                 <button
@@ -736,24 +720,26 @@ export function UsageLimiterApp() {
                   onClick={() => setDraftAppearance("dark")}
                 >Dark</button>
               </div>
+              </div>
             </section>
 
-            {workspaces.length === 0 ? (
-              <section className="limiter-settings-row limiter-settings-row--workspace">
+            <section className="limiter-settings-card limiter-settings-row--general">
+              <div className="limiter-settings-card__heading"><h2>General</h2></div>
+              <div className="limiter-settings-row--foreground">
                 <div>
-                  <h2>Codex workspace</h2>
-                  <p>Connect the folder where Codex runs to read usage</p>
+                  <h2>Start at login</h2>
+                  <p>Launch automatically when you sign in</p>
                 </div>
-                <button
-                  type="button"
-                  className="limiter-button limiter-button--quiet"
-                  onClick={() => void connectWorkspace()}
-                  disabled={busy !== null}
-                >
-                  <FolderOpen /> Connect
-                </button>
-              </section>
-            ) : null}
+                <label className="limiter-enabled-control">
+                  <span className="reference-switch">
+                    <input type="checkbox" checked={draftAutostart} onChange={(event) => setDraftAutostart(event.target.checked)} aria-label="Start at login" />
+                    <span aria-hidden="true" />
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <p className="limiter-settings-disclaimer">Interrupt and Block freeze every Codex app instantly, but a reply already generating on the server still finishes and counts toward usage.</p>
 
             {error ? <div className="limiter-feedback limiter-feedback--inline is-error" role="alert">{error}</div> : null}
           </div>

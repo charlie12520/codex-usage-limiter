@@ -39,6 +39,7 @@ describe("useAppSettings", () => {
       enabled: false,
       primaryThresholdPercent: 90,
       secondaryThresholdPercent: 90,
+      rearmAfterResetPercentLeft: null,
       action: "interrupt",
     });
     expect(

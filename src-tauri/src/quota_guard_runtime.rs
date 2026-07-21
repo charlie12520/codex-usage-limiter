@@ -31,7 +31,6 @@ use crate::shared::quota_guard::reducer::{reduce, ReducerEffect, ReducerEvent};
 use crate::state::AppState;
 use crate::types::QuotaGuardSettings;
 
-const BLOCKED_PREFIX: &str = "QUOTA_GUARD_BLOCKED";
 const THRESHOLD_SETTLE_DELAY_MS: i64 = 10_000;
 const MONITOR_POLL_INTERVAL_MS: i64 = 10_000;
 
@@ -277,16 +276,8 @@ async fn actor_loop(
                     Err(error)
                 } else {
                     let runtime = handle.runtime().await;
-                    if let Some(account) = runtime.account {
+                    if runtime.account.is_some() {
                         let generation = runtime.lifecycle_generation;
-                        if matches!(
-                            account.phase,
-                            QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset
-                        ) {
-                            if let Some(verify_at) = account.verify_at {
-                                schedule_verification(&handle, generation, verify_at);
-                            }
-                        }
                         // First read fires immediately so a fresh launch shows current
                         // usage instead of the persisted snapshot from the last run. A
                         // parked episode still needs these reads for monitor health and
@@ -321,23 +312,6 @@ async fn actor_loop(
                     },
                 )
                 .await
-            }
-            ActorEvent::Verify {
-                generation,
-                verify_at,
-            } => {
-                if handle
-                    .runtime()
-                    .await
-                    .account
-                    .as_ref()
-                    .is_some_and(|account| account.verify_at == Some(verify_at))
-                    && handle.runtime().await.lifecycle_generation == generation
-                {
-                    verify_once(&handle, &app, &path, &mut bindings, false).await
-                } else {
-                    Ok(())
-                }
             }
             ActorEvent::InterruptDeadline {
                 turn,
@@ -646,7 +620,7 @@ async fn synchronize_gate_with_runtime(
         .map(|account| account.phase);
     if matches!(
         phase,
-        Some(QuotaGuardPhase::Monitoring | QuotaGuardPhase::Ready)
+        Some(QuotaGuardPhase::Monitoring)
     ) {
         handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
         for (workspace_id, (epoch, _)) in bindings {
@@ -1147,21 +1121,6 @@ async fn run_effect(
             for (workspace_id, (epoch, _)) in bindings.iter() {
                 handle.inner.gate.set_epoch_open(epoch, workspace_id, true);
             }
-            let ready = handle
-                .runtime()
-                .await
-                .account
-                .as_ref()
-                .is_some_and(|account| account.phase == QuotaGuardPhase::Ready);
-            let notify_when_available = effective_settings(handle, app).await.notify_when_available;
-            if ready && notify_when_available {
-                let _ = crate::notifications::notify_quota_available(
-                    app,
-                    "Quota guard ready",
-                    "Quota limits have been verified healthy.",
-                    "quota-guard",
-                );
-            }
         }
         ReducerEffect::PersistDisarmed => {
             let state = app.state::<AppState>();
@@ -1180,6 +1139,20 @@ async fn run_effect(
             let mut settings = state.app_settings.lock().await.clone();
             settings.quota_guard.primary_threshold_percent = used_percent;
             settings.quota_guard.secondary_threshold_percent = used_percent;
+            let saved = crate::shared::settings_core::update_app_settings_core(
+                settings,
+                &state.app_settings,
+                &state.settings_path,
+            )
+            .await?;
+            handle.inner.runtime.lock().await.effective_settings = Some(saved.quota_guard);
+        }
+        ReducerEffect::PersistAutoRearm { threshold_percent } => {
+            let state = app.state::<AppState>();
+            let mut settings = state.app_settings.lock().await.clone();
+            settings.quota_guard.primary_threshold_percent = threshold_percent;
+            settings.quota_guard.secondary_threshold_percent = threshold_percent;
+            settings.quota_guard.armed = true;
             let saved = crate::shared::settings_core::update_app_settings_core(
                 settings,
                 &state.app_settings,
@@ -1394,10 +1367,6 @@ async fn run_effect(
                 }
             }
         }
-        ReducerEffect::ScheduleVerification {
-            generation,
-            verify_at,
-        } => schedule_verification(handle, generation, verify_at),
         ReducerEffect::ScheduleInterruptAck {
             turn,
             generation,
@@ -1482,17 +1451,6 @@ fn schedule_event(handle: &QuotaGuardHandle, deadline: i64, event: ActorEvent) {
             let _ = sender.send(event).await;
         });
     }
-}
-
-fn schedule_verification(handle: &QuotaGuardHandle, generation: u64, verify_at: i64) {
-    schedule_event(
-        handle,
-        verify_at,
-        ActorEvent::Verify {
-            generation,
-            verify_at,
-        },
-    );
 }
 
 fn schedule_healthy_revalidation(handle: &QuotaGuardHandle, generation: u64, due_at: i64) {
@@ -1666,7 +1624,7 @@ async fn handle_command(
 fn external_suspension_phase(phase: QuotaGuardPhase) -> bool {
     matches!(
         phase,
-        QuotaGuardPhase::Interrupting | QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset
+        QuotaGuardPhase::Tripped
     )
 }
 
@@ -1997,7 +1955,6 @@ async fn public_state_with_bindings(
             snapshot_fresh: false,
             breached_windows: Vec::new(),
             affected_turns: Vec::new(),
-            verify_at: None,
             monitor_healthy: true,
             last_error: None,
             suspended_external_engines: Vec::new(),
@@ -2033,7 +1990,6 @@ async fn public_state_with_bindings(
             .is_some_and(|snapshot| snapshot.is_fresh_at(now_ms())),
         breached_windows: account.breached_windows.iter().copied().collect(),
         affected_turns,
-        verify_at: account.verify_at,
         monitor_healthy: account.monitor_healthy,
         last_error: account.last_error.clone(),
         suspended_external_engines: account
@@ -2174,597 +2130,5 @@ pub(crate) async fn quota_guard_resolve_intervention(
                 .await
         }
         _ => Err("unsupported quota guard resolution".into()),
-    }
-}
-
-pub(crate) fn quota_guard_blocked_error(phase: QuotaGuardPhase, verify_at: Option<i64>) -> String {
-    format!(
-        "{BLOCKED_PREFIX}|state={}|verifyAt={}",
-        phase_name(phase),
-        verify_at.map(|value| value.to_string()).unwrap_or_default()
-    )
-}
-fn phase_name(phase: QuotaGuardPhase) -> &'static str {
-    match phase {
-        QuotaGuardPhase::Disabled => "disabled",
-        QuotaGuardPhase::Monitoring => "monitoring",
-        QuotaGuardPhase::Tripped => "tripped",
-        QuotaGuardPhase::RevalidatingIdentity => "revalidatingIdentity",
-        QuotaGuardPhase::Interrupting => "interrupting",
-        QuotaGuardPhase::Parked => "parked",
-        QuotaGuardPhase::VerifyingReset => "verifyingReset",
-        QuotaGuardPhase::Ready => "ready",
-        QuotaGuardPhase::InterventionRequired => "interventionRequired",
-    }
-}
-#[cfg(all(test, any()))]
-mod retired_tests {
-    use super::*;
-    use crate::shared::quota_guard::gate::ProcessGate;
-    use crate::shared::quota_guard::model::{
-        AccountRuntime, QuotaGuardRuntimeState, QuotaWindowKind, RateLimitSnapshot, RateLimitWindow,
-    };
-    use crate::shared::quota_guard::persistence::{load_runtime, persist_runtime, LoadRuntime};
-    use crate::types::{QuotaAction, QuotaGuardSettings};
-
-    #[test]
-    fn strict_identity_accepts_only_account_fields_through_known_envelopes() {
-        assert_eq!(
-            strict_account_identity(&serde_json::json!({
-                "id": 42,
-                "result": { "account": { "email": "Member@Example.test", "planType": "pro" } }
-            })),
-            Some("member@example.test".into()),
-        );
-        assert_eq!(
-            strict_account_identity(&serde_json::json!({
-                "id": "member@example.test",
-                "result": { "requestId": "unrelated" }
-            })),
-            None,
-        );
-        assert_eq!(
-            strict_account_identity(&serde_json::json!({
-                "metadata": { "email": "member@example.test" }
-            })),
-            None,
-        );
-    }
-
-    #[test]
-    fn rapid_threshold_changes_apply_only_the_final_settled_value() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let base = QuotaGuardSettings::default();
-            handle.inner.runtime.lock().await.effective_settings = Some(base.clone());
-
-            let mut first = base.clone();
-            first.primary_threshold_percent = 27;
-            first.secondary_threshold_percent = 27;
-            let (_, first_due) = prepare_settings_change(
-                &handle,
-                SettingsChanged {
-                    previous: base.clone(),
-                    updated: first.clone(),
-                },
-                1_000,
-            )
-            .await;
-            assert_eq!(first_due, Some(11_000));
-
-            let mut second = first.clone();
-            second.primary_threshold_percent = 28;
-            second.secondary_threshold_percent = 28;
-            let (_, second_due) = prepare_settings_change(
-                &handle,
-                SettingsChanged {
-                    previous: first,
-                    updated: second.clone(),
-                },
-                1_100,
-            )
-            .await;
-            assert_eq!(second_due, Some(11_100));
-
-            let mut final_draft = second.clone();
-            final_draft.primary_threshold_percent = 34;
-            final_draft.secondary_threshold_percent = 34;
-            let (_, final_due) = prepare_settings_change(
-                &handle,
-                SettingsChanged {
-                    previous: second,
-                    updated: final_draft,
-                },
-                1_200,
-            )
-            .await;
-            assert_eq!(final_due, Some(11_200));
-            assert!(take_settled_threshold_change(&handle, 11_000)
-                .await
-                .unwrap()
-                .is_none());
-            assert!(take_settled_threshold_change(&handle, 11_100)
-                .await
-                .unwrap()
-                .is_none());
-
-            let applied = take_settled_threshold_change(&handle, 11_200)
-                .await
-                .unwrap()
-                .expect("final threshold change applies once");
-            assert_eq!(applied.previous.primary_threshold_percent, 90);
-            assert_eq!(applied.updated.primary_threshold_percent, 34);
-            assert!(handle.runtime().await.pending_thresholds.is_none());
-        });
-    }
-
-    #[test]
-    fn threshold_change_during_settle_window_resets_the_timer() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let base = QuotaGuardSettings::default();
-            handle.inner.runtime.lock().await.effective_settings = Some(base.clone());
-            let mut first = base.clone();
-            first.primary_threshold_percent = 70;
-            let (_, first_due) = prepare_settings_change(
-                &handle,
-                SettingsChanged {
-                    previous: base,
-                    updated: first.clone(),
-                },
-                500,
-            )
-            .await;
-            let mut second = first.clone();
-            second.primary_threshold_percent = 71;
-            let (_, second_due) = prepare_settings_change(
-                &handle,
-                SettingsChanged {
-                    previous: first,
-                    updated: second,
-                },
-                9_999,
-            )
-            .await;
-
-            assert_eq!(first_due, Some(10_500));
-            assert_eq!(second_due, Some(19_999));
-            assert!(take_settled_threshold_change(&handle, 10_500)
-                .await
-                .unwrap()
-                .is_none());
-            assert_eq!(
-                handle
-                    .runtime()
-                    .await
-                    .effective_settings
-                    .unwrap()
-                    .primary_threshold_percent,
-                90
-            );
-        });
-    }
-
-    #[test]
-    fn armed_toggle_bypasses_threshold_settle_debounce() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let base = QuotaGuardSettings::default();
-            handle.inner.runtime.lock().await.effective_settings = Some(base.clone());
-            let mut disarmed = base.clone();
-            disarmed.armed = false;
-
-            let (change, due) = prepare_settings_change(
-                &handle,
-                SettingsChanged {
-                    previous: base,
-                    updated: disarmed,
-                },
-                1_000,
-            )
-            .await;
-            assert_eq!(due, None);
-            assert!(!change.updated.armed);
-            assert!(handle.runtime().await.pending_thresholds.is_none());
-        });
-    }
-
-    #[test]
-    fn startup_restores_snapshot_for_first_live_threshold_crossing() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.enabled = true;
-        settings.primary_threshold_percent = 47;
-        settings.action = QuotaAction::InterruptImmediately;
-        settings.external_suspend = true;
-
-        let mut persisted = QuotaGuardRuntimeState::default();
-        let mut account = AccountRuntime::new("account".into(), 10_000);
-        account.phase = QuotaGuardPhase::Ready;
-        account.snapshot = Some(RateLimitSnapshot {
-            primary: Some(RateLimitWindow {
-                used_percent: 46,
-                window_duration_mins: Some(60),
-                resets_at: Some(2_000),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-            rate_limit_reached_type: None,
-            observed_at: 10_000,
-        });
-        persisted.account = Some(account);
-
-        // This stale value is possible after a completed debounce. It must not
-        // replace the saved app settings on the next launch.
-        let mut stale_effective_settings = settings.clone();
-        stale_effective_settings.primary_threshold_percent = 90;
-        persisted.effective_settings = Some(stale_effective_settings);
-
-        let recovered = recover(true, LoadRuntime::Valid(persisted), 10_001);
-        let runtime = restore_runtime_for_startup(recovered.state, &settings);
-        let effective_settings = runtime
-            .effective_settings
-            .clone()
-            .expect("startup settings");
-        assert_eq!(effective_settings.primary_threshold_percent, 47);
-        assert_eq!(
-            runtime
-                .account
-                .as_ref()
-                .and_then(|account| account.snapshot.as_ref())
-                .and_then(|snapshot| snapshot.primary.as_ref())
-                .map(|window| window.used_percent),
-            Some(46),
-        );
-
-        let live = RateLimitSnapshot {
-            primary: Some(RateLimitWindow {
-                used_percent: 47,
-                window_duration_mins: Some(60),
-                resets_at: Some(2_000),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-            rate_limit_reached_type: None,
-            observed_at: 10_001,
-        };
-        let (runtime, effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: live,
-                full_read: true,
-                verification: false,
-                now_ms: 10_001,
-            },
-            &effective_settings,
-        );
-
-        assert_eq!(
-            runtime.account.map(|account| account.phase),
-            Some(QuotaGuardPhase::Interrupting)
-        );
-        assert!(effects.contains(&ReducerEffect::SuspendExternalEngines));
-    }
-
-    #[test]
-    fn parked_account_schedules_periodic_rate_limit_read() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let (sender, mut receiver) = mpsc::channel(1);
-            *handle.inner.sender.lock().expect("sender lock") = Some(sender);
-            let generation = 7;
-            let mut account = AccountRuntime::new("account".into(), 1);
-            account.phase = QuotaGuardPhase::Parked;
-            {
-                let mut runtime = handle.inner.runtime.lock().await;
-                runtime.lifecycle_generation = generation;
-                runtime.account = Some(account);
-            }
-
-            let due_at = now_ms();
-            assert!(schedule_monitor_poll_if_enabled(&handle, generation, due_at).await);
-            assert!(matches!(
-                tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await,
-                Ok(Some(ActorEvent::HealthyRevalidate { generation: observed_generation, due_at: observed_due_at }))
-                    if observed_generation == generation && observed_due_at == due_at
-            ));
-        });
-    }
-
-    #[test]
-    fn monitor_polling_remains_enabled_for_every_active_phase() {
-        for phase in [
-            QuotaGuardPhase::Monitoring,
-            QuotaGuardPhase::RevalidatingIdentity,
-            QuotaGuardPhase::Interrupting,
-            QuotaGuardPhase::Parked,
-            QuotaGuardPhase::VerifyingReset,
-            QuotaGuardPhase::Ready,
-            QuotaGuardPhase::InterventionRequired,
-        ] {
-            assert!(
-                monitor_polling_enabled(phase),
-                "{phase:?} must keep polling rate limits"
-            );
-        }
-        assert!(!monitor_polling_enabled(QuotaGuardPhase::Disabled));
-    }
-    #[test]
-    fn non_enable_action_change_keeps_breached_notify_only_monitoring_open_until_apply() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let mut account = AccountRuntime::new("account".into(), 1);
-            account.phase = QuotaGuardPhase::Monitoring;
-            account.breached_windows.insert(QuotaWindowKind::Primary);
-            account.snapshot = Some(RateLimitSnapshot {
-                primary: Some(RateLimitWindow {
-                    used_percent: 90,
-                    window_duration_mins: None,
-                    resets_at: Some(60),
-                }),
-                secondary: None,
-                credits: None,
-                plan_type: None,
-                rate_limit_reached_type: None,
-                observed_at: 1,
-            });
-            handle.inner.runtime.lock().await.account = Some(account);
-            let mut bindings = HashMap::new();
-            bindings.insert("workspace".into(), ("epoch".into(), "home".into()));
-            handle
-                .inner
-                .gate
-                .register_closed_epoch("epoch".into(), "workspace".into());
-
-            synchronize_gate_with_runtime(&handle, &bindings).await;
-            assert_eq!(handle.inner.gate.policy(), ProcessPolicy::EnabledOpen);
-            assert!(handle.inner.gate.status(Some("epoch"), "workspace").open);
-
-            let mut settings = QuotaGuardSettings::default();
-            settings.action = QuotaAction::InterruptImmediately;
-            let runtime = handle.runtime().await;
-            let (_, effects) = reduce(
-                runtime,
-                ReducerEvent::ApplyActionNow { now_ms: 2 },
-                &settings,
-            );
-            assert!(effects
-                .iter()
-                .any(|effect| matches!(effect, ReducerEffect::SetProcessClosed)));
-            close_enforcement_before_persistence(&handle, &effects);
-            assert_eq!(handle.inner.gate.policy(), ProcessPolicy::EnabledClosed);
-        });
-    }
-
-    #[test]
-    fn actor_smoke_persists_closed_gate_before_exact_interrupt() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (mut runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &settings,
-        );
-        runtime
-            .account
-            .as_mut()
-            .unwrap()
-            .local_turn_registry
-            .push(TurnKey {
-                session_epoch: "epoch".into(),
-                workspace_id: "workspace".into(),
-                thread_id: "thread".into(),
-                turn_id: "turn".into(),
-            });
-        let baseline = RateLimitSnapshot {
-            primary: Some(RateLimitWindow {
-                used_percent: 89,
-                window_duration_mins: None,
-                resets_at: Some(60),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-            rate_limit_reached_type: None,
-            observed_at: 1,
-        };
-        let (runtime, _) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot: baseline,
-                full_read: true,
-                verification: false,
-                now_ms: 1,
-            },
-            &settings,
-        );
-        let snapshot = RateLimitSnapshot {
-            primary: Some(RateLimitWindow {
-                used_percent: 100,
-                window_duration_mins: None,
-                resets_at: Some(60),
-            }),
-            secondary: None,
-            credits: None,
-            plan_type: None,
-            rate_limit_reached_type: Some("hard".into()),
-            observed_at: 2,
-        };
-        let (runtime, effects) = reduce(
-            runtime,
-            ReducerEvent::Snapshot {
-                snapshot,
-                full_read: true,
-                verification: false,
-                now_ms: 2,
-            },
-            &settings,
-        );
-        assert!(effects.contains(&ReducerEffect::SetProcessClosed));
-        let gate = ProcessGate::default();
-        gate.set_policy(ProcessPolicy::EnabledClosed);
-        let path = std::env::temp_dir().join(format!(
-            "quota-guard-actor-smoke-{}.json",
-            std::process::id()
-        ));
-        persist_runtime(&path, &runtime).unwrap();
-        assert_eq!(gate.policy(), ProcessPolicy::EnabledClosed);
-        assert!(
-            matches!(load_runtime(&path, 2), LoadRuntime::Valid(saved) if matches!(saved.account.as_ref().map(|account| account.phase), Some(QuotaGuardPhase::Interrupting)))
-        );
-        let generation = runtime.lifecycle_generation;
-        let (_, final_effects) = reduce(
-            runtime,
-            ReducerEvent::FinalizeClosedEpisode {
-                transition_id: generation,
-                now_ms: 1,
-            },
-            &settings,
-        );
-        assert!(final_effects.iter().any(|effect| matches!(effect, ReducerEffect::Interrupt { turn, .. } if turn.workspace_id == "workspace" && turn.thread_id == "thread" && turn.turn_id == "turn")));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn enforcing_close_blocks_post_snapshot_admission_and_defers_finalization() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let (sender, mut receiver) = mpsc::channel(1);
-            *handle.inner.sender.lock().expect("sender lock") = Some(sender);
-            handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
-            handle
-                .inner
-                .gate
-                .register_closed_epoch("epoch".into(), "workspace".into());
-            handle.inner.gate.set_epoch_open("epoch", "workspace", true);
-            let admitted_before_close = handle
-                .inner
-                .gate
-                .admit(Some("epoch"), "workspace")
-                .expect("pre-close admission");
-
-            close_enforcement_before_persistence(
-                &handle,
-                &[
-                    ReducerEffect::SetProcessClosed,
-                    ReducerEffect::FinalizeClosedEpisode { transition_id: 7 },
-                ],
-            );
-            assert_eq!(handle.inner.gate.policy(), ProcessPolicy::EnabledClosed);
-            assert!(
-                handle.inner.gate.admit(Some("epoch"), "workspace").is_err(),
-                "a post-snapshot request must not stay open"
-            );
-
-            enqueue_finalization_after_admissions(&handle, 7)
-                .expect("waiter is queued without blocking the actor");
-            assert!(
-                receiver.try_recv().is_err(),
-                "finalization waits outside the actor while a pre-close request persists its fact"
-            );
-            drop(admitted_before_close);
-            let event =
-                tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
-                    .await
-                    .expect("finalization is queued after admission drains")
-                    .expect("actor sender remains open");
-            assert!(matches!(
-                event,
-                ActorEvent::FinalizeClosedEpisode { generation: 7 }
-            ));
-        });
-    }
-
-    #[test]
-    fn usage_limit_terminal_orders_full_read_before_closing_finalization() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (mut runtime, _) = reduce(
-            QuotaGuardRuntimeState::default(),
-            ReducerEvent::Enable {
-                account_key: "a".into(),
-                now_ms: 1,
-            },
-            &settings,
-        );
-        let turn = TurnKey {
-            session_epoch: "epoch".into(),
-            workspace_id: "workspace".into(),
-            thread_id: "thread".into(),
-            turn_id: "turn".into(),
-        };
-        runtime
-            .account
-            .as_mut()
-            .expect("account")
-            .local_turn_registry
-            .push(turn.clone());
-
-        let (_, effects) = reduce(
-            runtime,
-            ReducerEvent::TurnTerminal {
-                turn,
-                status: "failed".into(),
-                error: Some(serde_json::json!({"error":{"codexErrorInfo":"usageLimitExceeded"}})),
-                now_ms: 2,
-            },
-            &settings,
-        );
-
-        assert!(matches!(
-            effects.as_slice(),
-            [
-                ReducerEffect::SetProcessClosed,
-                ReducerEffect::ReadFullRateLimits,
-                ReducerEffect::FinalizeClosedEpisode { .. },
-            ]
-        ));
-    }
-
-    #[test]
-    fn public_state_serializes_every_frontend_contract_field() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let mut account = AccountRuntime::new("hashed-account".into(), 1);
-            account.snapshot = Some(RateLimitSnapshot {
-                primary: Some(RateLimitWindow {
-                    used_percent: 20,
-                    window_duration_mins: Some(60),
-                    resets_at: Some(100),
-                }),
-                secondary: None,
-                credits: None,
-                plan_type: None,
-                rate_limit_reached_type: None,
-                observed_at: now_ms(),
-            });
-            handle.inner.runtime.lock().await.account = Some(account);
-            let value =
-                serde_json::to_value(public_state_with_bindings(&handle, &HashMap::new()).await)
-                    .unwrap();
-            for key in [
-                "accountKey",
-                "accountLabel",
-                "phase",
-                "snapshot",
-                "snapshotFresh",
-                "breachedWindows",
-                "affectedTurns",
-                "verifyAt",
-                "monitorHealthy",
-                "lastError",
-                "activity",
-                "admissionByWorkspace",
-            ] {
-                assert!(value.get(key).is_some(), "missing public state key {key}");
-            }
-            assert_eq!(value["accountKey"], "hashed-account");
-            assert!(value["activity"].as_array().is_some());
-            assert!(value["admissionByWorkspace"].as_object().is_some());
-        });
     }
 }

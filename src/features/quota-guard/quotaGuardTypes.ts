@@ -4,11 +4,6 @@ export type QuotaGuardPhase =
   | "disabled"
   | "monitoring"
   | "tripped"
-  | "revalidatingIdentity"
-  | "interrupting"
-  | "parked"
-  | "verifyingReset"
-  | "ready"
   | "interventionRequired";
 
 export type QuotaGuardWindowKind = "primary" | "secondary" | "hardLimit";
@@ -70,7 +65,6 @@ export type QuotaGuardPublicState = {
   snapshotFresh: boolean;
   breachedWindows: QuotaGuardWindowKind[];
   affectedTurns: QuotaGuardTurn[];
-  verifyAt: number | null;
   monitorHealthy: boolean;
   lastError: string | null;
   suspendedExternalEngines?: QuotaGuardSuspendedEngine[];
