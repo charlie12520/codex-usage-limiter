@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use crate::types::{DrainTimeoutAction, QuotaAction};
+use crate::types::QuotaGuardSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -220,11 +221,34 @@ pub(crate) struct QuotaGuardRuntimeState {
     #[serde(default)]
     pub(crate) next_operation_id: u64,
     pub(crate) account: Option<AccountRuntime>,
+    /// The settings currently enforced by the coordinator. This intentionally
+    /// differs from the UI's durable draft while a threshold drag is settling.
+    #[serde(default)]
+    pub(crate) effective_settings: Option<QuotaGuardSettings>,
+    /// A durable threshold draft prevents a quit during the settle window from
+    /// losing the user's final grabber position.
+    #[serde(default)]
+    pub(crate) pending_thresholds: Option<PendingThresholdSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingThresholdSettings {
+    pub(crate) primary_threshold_percent: u8,
+    pub(crate) secondary_threshold_percent: u8,
+    pub(crate) settles_at: i64,
 }
 
 impl Default for QuotaGuardRuntimeState {
     fn default() -> Self {
-        Self { schema_version: 1, lifecycle_generation: 0, next_operation_id: 0, account: None }
+        Self {
+            schema_version: 1,
+            lifecycle_generation: 0,
+            next_operation_id: 0,
+            account: None,
+            effective_settings: None,
+            pending_thresholds: None,
+        }
     }
 }
 

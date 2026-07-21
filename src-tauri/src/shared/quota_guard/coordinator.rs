@@ -52,6 +52,7 @@ pub(crate) enum ActorEvent {
     SettingsChanged(SettingsChanged, oneshot::Sender<Result<(), String>>),
     Command(QuotaGuardCommand, oneshot::Sender<Result<QuotaGuardPublicState, String>>),
     AppStartupRehydrate,
+    ThresholdSettled { settles_at: i64 },
     FinalizeClosedEpisode { generation: u64 },
     DrainDeadline { generation: u64, deadline: i64 },
     Verify { generation: u64, verify_at: i64 },

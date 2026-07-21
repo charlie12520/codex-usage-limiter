@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ use crate::shared::quota_guard::coordinator::{
 };
 use crate::shared::quota_guard::gate::ProcessPolicy;
 use crate::shared::quota_guard::external_suspend;
-use crate::shared::quota_guard::model::{PendingLocalStart, QuotaGuardActivityEntry, QuotaGuardActivityKind, QuotaGuardPhase, TurnKey};
+use crate::shared::quota_guard::model::{PendingLocalStart, PendingThresholdSettings, QuotaGuardActivityEntry, QuotaGuardActivityKind, QuotaGuardPhase, TurnKey};
 use crate::shared::quota_guard::parser::parse_rate_limits;
 use crate::shared::quota_guard::persistence::{load_runtime, persist_runtime};
 use crate::shared::quota_guard::recovery::recover;
@@ -26,6 +26,7 @@ use crate::state::AppState;
 use crate::types::QuotaGuardSettings;
 
 const BLOCKED_PREFIX: &str = "QUOTA_GUARD_BLOCKED";
+const THRESHOLD_SETTLE_DELAY_MS: i64 = 10_000;
 
 #[derive(Clone)]
 struct LocalAppServerControl {
@@ -118,7 +119,11 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
     let settings = app.state::<AppState>().app_settings.lock().await.clone();
     let decision = recover(settings.quota_guard.enabled, load_runtime(&path, now_ms()), now_ms());
     handle.inner.gate.set_policy(decision.policy);
-    *handle.inner.runtime.lock().await = decision.state;
+    let mut runtime = decision.state;
+    if runtime.effective_settings.is_none() {
+        runtime.effective_settings = Some(settings.quota_guard.clone());
+    }
+    *handle.inner.runtime.lock().await = runtime;
     if let Err(error) = persist_current(&handle, &path).await {
         handle.fail_closed(&format!("quota guard startup persistence failed: {error}")).await;
     }
@@ -193,6 +198,8 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                     }
                 }
             }
+            ActorEvent::ThresholdSettled { settles_at } =>
+                settle_pending_thresholds(&handle, &app, &path, &mut bindings, settles_at).await,
             ActorEvent::FinalizeClosedEpisode { generation } =>
                 apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: now_ms() }).await,
             ActorEvent::DrainDeadline { generation, deadline } => {
@@ -247,6 +254,16 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
     handle.inner.gate.close();
 }
 async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, change: SettingsChanged) -> Result<(), String> {
+    let (change, schedule_at) = prepare_settings_change(handle, change, now_ms()).await;
+    persist_current(handle, path).await?;
+    apply_effective_settings_changed(handle, app, path, bindings, change).await?;
+    if let Some(settles_at) = schedule_at {
+        schedule_threshold_settle(handle, settles_at)?;
+    }
+    Ok(())
+}
+
+async fn apply_effective_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, change: SettingsChanged) -> Result<(), String> {
     if (change.previous.external_suspend && !change.updated.external_suspend)
         || (change.previous.armed && !change.updated.armed) {
         resume_external_engines(handle, path).await?;
@@ -265,7 +282,7 @@ async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, pat
         let workspace_id = bindings.keys().next().cloned()
             .ok_or_else(|| "quota guard requires a connected local workspace before it can be enabled".to_string())?;
         bootstrap_workspace(handle, app, path, bindings, &workspace_id).await?;
-    } else {
+    } else if change.previous != change.updated {
         let thresholds_changed = change.previous.primary_threshold_percent != change.updated.primary_threshold_percent
             || change.previous.secondary_threshold_percent != change.updated.secondary_threshold_percent;
         // A raised threshold can make the snapshot that caused the parked
@@ -281,6 +298,75 @@ async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, pat
         .await?;
         synchronize_gate_with_runtime(handle, bindings).await;
     }
+    Ok(())
+}
+
+/// Stores UI threshold drafts durably, but holds the coordinator at its last
+/// effective thresholds until the draft has remained unchanged for ten seconds.
+/// Non-threshold settings are copied into the effective value immediately.
+async fn prepare_settings_change(handle: &QuotaGuardHandle, requested: SettingsChanged, now: i64) -> (SettingsChanged, Option<i64>) {
+    let mut runtime = handle.inner.runtime.lock().await;
+    let previous = runtime.effective_settings.clone().unwrap_or_else(|| requested.previous.clone());
+    let requested_thresholds_changed = requested.previous.primary_threshold_percent != requested.updated.primary_threshold_percent
+        || requested.previous.secondary_threshold_percent != requested.updated.secondary_threshold_percent;
+    let mut updated = requested.updated;
+    let mut schedule_at = None;
+
+    if requested_thresholds_changed {
+        if updated.primary_threshold_percent == previous.primary_threshold_percent
+            && updated.secondary_threshold_percent == previous.secondary_threshold_percent {
+            runtime.pending_thresholds = None;
+        } else {
+            let settles_at = now.saturating_add(THRESHOLD_SETTLE_DELAY_MS);
+            runtime.pending_thresholds = Some(PendingThresholdSettings {
+                primary_threshold_percent: updated.primary_threshold_percent,
+                secondary_threshold_percent: updated.secondary_threshold_percent,
+                settles_at,
+            });
+            updated.primary_threshold_percent = previous.primary_threshold_percent;
+            updated.secondary_threshold_percent = previous.secondary_threshold_percent;
+            schedule_at = Some(settles_at);
+        }
+    } else if let Some(pending) = runtime.pending_thresholds.as_ref() {
+        updated.primary_threshold_percent = previous.primary_threshold_percent;
+        updated.secondary_threshold_percent = previous.secondary_threshold_percent;
+        schedule_at = Some(pending.settles_at);
+    }
+
+    runtime.effective_settings = Some(updated.clone());
+    (SettingsChanged { previous, updated }, schedule_at)
+}
+
+async fn settle_pending_thresholds(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, settles_at: i64) -> Result<(), String> {
+    if let Some(change) = take_settled_threshold_change(handle, settles_at).await? {
+        apply_effective_settings_changed(handle, app, path, bindings, change).await?;
+    }
+    Ok(())
+}
+
+async fn take_settled_threshold_change(handle: &QuotaGuardHandle, settles_at: i64) -> Result<Option<SettingsChanged>, String> {
+    let mut runtime = handle.inner.runtime.lock().await;
+    let Some(pending) = runtime.pending_thresholds.clone().filter(|pending| pending.settles_at == settles_at) else {
+        return Ok(None);
+    };
+    let previous = runtime.effective_settings.clone()
+        .ok_or_else(|| "quota guard effective settings are unavailable".to_string())?;
+    let mut updated = previous.clone();
+    updated.primary_threshold_percent = pending.primary_threshold_percent;
+    updated.secondary_threshold_percent = pending.secondary_threshold_percent;
+    runtime.effective_settings = Some(updated.clone());
+    runtime.pending_thresholds = None;
+    Ok(Some(SettingsChanged { previous, updated }))
+}
+
+fn schedule_threshold_settle(handle: &QuotaGuardHandle, settles_at: i64) -> Result<(), String> {
+    let sender = handle.inner.sender.lock().expect("quota guard sender lock poisoned").clone()
+        .ok_or_else(|| "quota guard actor is unavailable".to_string())?;
+    tauri::async_runtime::spawn(async move {
+        let delay = settles_at.saturating_sub(now_ms());
+        tokio::time::sleep(Duration::from_millis(u64::try_from(delay).unwrap_or_default())).await;
+        let _ = sender.send(ActorEvent::ThresholdSettled { settles_at }).await;
+    });
     Ok(())
 }
 
@@ -303,6 +389,9 @@ async fn handle_observed(handle: &QuotaGuardHandle, app: &AppHandle, path: &Path
             bindings.insert(workspace_id.clone(), (session_epoch, canonical_codex_home));
             if app.state::<AppState>().app_settings.lock().await.quota_guard.enabled {
                 bootstrap_workspace(handle, app, path, bindings, &workspace_id).await?;
+            }
+            if let Some(pending) = handle.runtime().await.pending_thresholds {
+                schedule_threshold_settle(handle, pending.settles_at)?;
             }
         }
         QuotaGuardEvent::WorkspaceDisconnected { session_epoch, workspace_id } => {
@@ -383,7 +472,7 @@ async fn bootstrap_workspace(handle: &QuotaGuardHandle, app: &AppHandle, path: &
     match current.account.as_ref().map(|account| (account.account_key.as_str(), account.phase)) {
         Some((existing, _)) if existing != account_key => return Err("strict account identity changed; disable and re-enable quota guard".into()),
         None | Some((_, QuotaGuardPhase::Disabled)) => {
-            let settings = app.state::<AppState>().app_settings.lock().await.quota_guard.clone();
+            let settings = effective_settings(handle, app).await;
             apply_event_with_settings(handle, app, path, bindings, ReducerEvent::Enable { account_key, now_ms: now_ms() }, &settings).await?;
         }
         _ => {}
@@ -424,7 +513,7 @@ async fn bootstrap_workspace(handle: &QuotaGuardHandle, app: &AppHandle, path: &
 async fn apply_rate_limits(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, _workspace_id: &str, value: Value, full_read: bool, verification: bool) -> Result<(), String> {
     let prior = handle.runtime().await.account.and_then(|account| account.snapshot);
     let snapshot = parse_rate_limits(&value, prior.as_ref(), now_ms())?;
-    let settings = app.state::<AppState>().app_settings.lock().await.quota_guard.clone();
+    let settings = effective_settings(handle, app).await;
     apply_event_with_settings(handle, app, path, bindings, ReducerEvent::Snapshot {
         snapshot,
         full_read,
@@ -435,8 +524,17 @@ async fn apply_rate_limits(handle: &QuotaGuardHandle, app: &AppHandle, path: &Pa
 
 
 async fn apply_event(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, event: ReducerEvent) -> Result<(), String> {
-    let settings = app.state::<AppState>().app_settings.lock().await.quota_guard.clone();
+    let settings = effective_settings(handle, app).await;
     apply_event_with_settings(handle, app, path, bindings, event, &settings).await
+}
+
+async fn effective_settings(handle: &QuotaGuardHandle, app: &AppHandle) -> QuotaGuardSettings {
+    if let Some(settings) = handle.runtime().await.effective_settings {
+        return settings;
+    }
+    // This fallback is only for a just-created or legacy runtime before actor
+    // startup has persisted its initial effective settings.
+    app.state::<AppState>().app_settings.lock().await.quota_guard.clone()
 }
 
 async fn apply_event_with_settings(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, event: ReducerEvent, settings: &QuotaGuardSettings) -> Result<(), String> {
@@ -478,7 +576,7 @@ async fn run_effect(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, 
             handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
             for (workspace_id, (epoch, _)) in bindings.iter() { handle.inner.gate.set_epoch_open(epoch, workspace_id, true); }
             let ready = handle.runtime().await.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Ready);
-            let notify_when_available = app.state::<AppState>().app_settings.lock().await.quota_guard.notify_when_available;
+            let notify_when_available = effective_settings(handle, app).await.notify_when_available;
             if ready && notify_when_available {
                 let _ = crate::notifications::notify_quota_available(app, "Quota guard ready", "Quota limits have been verified healthy.", "quota-guard");
             }
@@ -933,6 +1031,76 @@ mod tests {
             })),
             None,
         );
+    }
+
+    #[test]
+    fn rapid_threshold_changes_apply_only_the_final_settled_value() {
+        tauri::async_runtime::block_on(async {
+            let handle = QuotaGuardHandle::default();
+            let base = QuotaGuardSettings::default();
+            handle.inner.runtime.lock().await.effective_settings = Some(base.clone());
+
+            let mut first = base.clone();
+            first.primary_threshold_percent = 27;
+            first.secondary_threshold_percent = 27;
+            let (_, first_due) = prepare_settings_change(&handle, SettingsChanged { previous: base.clone(), updated: first.clone() }, 1_000).await;
+            assert_eq!(first_due, Some(11_000));
+
+            let mut second = first.clone();
+            second.primary_threshold_percent = 28;
+            second.secondary_threshold_percent = 28;
+            let (_, second_due) = prepare_settings_change(&handle, SettingsChanged { previous: first, updated: second.clone() }, 1_100).await;
+            assert_eq!(second_due, Some(11_100));
+
+            let mut final_draft = second.clone();
+            final_draft.primary_threshold_percent = 34;
+            final_draft.secondary_threshold_percent = 34;
+            let (_, final_due) = prepare_settings_change(&handle, SettingsChanged { previous: second, updated: final_draft }, 1_200).await;
+            assert_eq!(final_due, Some(11_200));
+            assert!(take_settled_threshold_change(&handle, 11_000).await.unwrap().is_none());
+            assert!(take_settled_threshold_change(&handle, 11_100).await.unwrap().is_none());
+
+            let applied = take_settled_threshold_change(&handle, 11_200).await.unwrap().expect("final threshold change applies once");
+            assert_eq!(applied.previous.primary_threshold_percent, 90);
+            assert_eq!(applied.updated.primary_threshold_percent, 34);
+            assert!(handle.runtime().await.pending_thresholds.is_none());
+        });
+    }
+
+    #[test]
+    fn threshold_change_during_settle_window_resets_the_timer() {
+        tauri::async_runtime::block_on(async {
+            let handle = QuotaGuardHandle::default();
+            let base = QuotaGuardSettings::default();
+            handle.inner.runtime.lock().await.effective_settings = Some(base.clone());
+            let mut first = base.clone();
+            first.primary_threshold_percent = 70;
+            let (_, first_due) = prepare_settings_change(&handle, SettingsChanged { previous: base, updated: first.clone() }, 500).await;
+            let mut second = first.clone();
+            second.primary_threshold_percent = 71;
+            let (_, second_due) = prepare_settings_change(&handle, SettingsChanged { previous: first, updated: second }, 9_999).await;
+
+            assert_eq!(first_due, Some(10_500));
+            assert_eq!(second_due, Some(19_999));
+            assert!(take_settled_threshold_change(&handle, 10_500).await.unwrap().is_none());
+            assert_eq!(handle.runtime().await.effective_settings.unwrap().primary_threshold_percent, 90);
+        });
+    }
+
+    #[test]
+    fn armed_toggle_bypasses_threshold_settle_debounce() {
+        tauri::async_runtime::block_on(async {
+            let handle = QuotaGuardHandle::default();
+            let base = QuotaGuardSettings::default();
+            handle.inner.runtime.lock().await.effective_settings = Some(base.clone());
+            let mut disarmed = base.clone();
+            disarmed.armed = false;
+
+            let (change, due) = prepare_settings_change(&handle, SettingsChanged { previous: base, updated: disarmed }, 1_000).await;
+            assert_eq!(due, None);
+            assert!(!change.updated.armed);
+            assert!(handle.runtime().await.pending_thresholds.is_none());
+        });
     }
     #[test]
     fn non_enable_action_change_keeps_breached_notify_only_monitoring_open_until_apply() {
