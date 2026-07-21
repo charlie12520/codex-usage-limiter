@@ -139,7 +139,14 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByRole("progressbar", { name: "Current Codex usage" }).getAttribute("aria-valuenow")).toBe("37");
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
     expect(screen.getByText("At 10%")).toBeTruthy();
-    expect(screen.getByText("Last checked just now")).toBeTruthy();
+    expect(document.querySelector(".limiter-compact-footer")).toBeNull();
+  });
+
+  it("keeps the compact Connect action when no workspace is attached", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    render(<UsageLimiterApp />);
+
+    expect(await screen.findByRole("button", { name: "Connect" })).toBeTruthy();
   });
 
   it("stages the autostart toggle and applies it on save", async () => {

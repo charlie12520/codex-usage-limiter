@@ -42,15 +42,15 @@ const WINDOW_MODE_KEY = "codex-usage-limiter.windowMode";
 const ALWAYS_ON_TOP_KEY = "codex-usage-limiter.alwaysOnTop";
 
 const MODE_WINDOWS: Record<WindowMode, { width: number; height: number; minWidth: number; minHeight: number; resizable: boolean }> = {
-  compact: { width: 420, height: 240, minWidth: 380, minHeight: 220, resizable: true },
-  mini: { width: 320, height: 168, minWidth: 320, minHeight: 168, resizable: false },
+  compact: { width: 420, height: 204, minWidth: 380, minHeight: 204, resizable: true },
+  mini: { width: 320, height: 144, minWidth: 320, minHeight: 144, resizable: false },
   pill: { width: 280, height: 72, minWidth: 280, minHeight: 72, resizable: false },
 };
 const SETTINGS_WINDOW = { width: 420, height: 560, minWidth: 420, minHeight: 560, resizable: false };
 
 const windowModeOptions: Array<{ value: WindowMode; label: string; dims: string }> = [
-  { value: "compact", label: "Compact", dims: "420 × 240" },
-  { value: "mini", label: "Mini", dims: "320 × 168" },
+  { value: "compact", label: "Compact", dims: "420 × 204" },
+  { value: "mini", label: "Mini", dims: "320 × 144" },
   { value: "pill", label: "Pill", dims: "280 × 72" },
 ];
 
@@ -536,16 +536,13 @@ export function UsageLimiterApp() {
                   </select>
                 </label>
               </div>
-              <footer className="limiter-compact-footer">
-                <span className="limiter-last-checked">
-                  {quotaGuard.state?.snapshotFresh ? "Last checked just now" : "Waiting for update"}
-                </span>
-                {workspaces.length === 0 ? (
+              {workspaces.length === 0 ? (
+                <footer className="limiter-compact-footer">
                   <button type="button" onClick={() => void connectWorkspace()} disabled={busy !== null}>
                     <FolderOpen /> Connect
                   </button>
-                ) : null}
-              </footer>
+                </footer>
+              ) : null}
             </>
           ) : null}
 

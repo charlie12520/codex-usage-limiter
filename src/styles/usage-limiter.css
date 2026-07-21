@@ -489,7 +489,7 @@ select:disabled {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 18px 0;
+  padding: 8px 18px 0;
 }
 
 [data-mode="compact"] .limiter-usage__value {
@@ -505,7 +505,9 @@ select:disabled {
 }
 
 [data-mode="compact"] .limiter-progress {
-  margin: auto 18px 26px;
+  /* The label hangs below the handle, so reserve its space explicitly rather
+     than using an expanding spacer above the bar. */
+  margin: 8px 18px 32px;
   align-self: auto;
 }
 
@@ -513,7 +515,7 @@ select:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 18px 12px;
+  margin: 0 18px 8px;
 }
 
 .limiter-action-row > span {
@@ -548,21 +550,11 @@ select:disabled {
 .limiter-compact-footer {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  padding: 0 12px 0 18px;
+  justify-content: flex-end;
+  min-height: 34px;
+  padding: 0 12px;
   border-top: 1px solid var(--border);
   background: var(--titlebar);
-}
-
-.limiter-last-checked {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 11px;
-  color: var(--muted);
-  white-space: nowrap;
 }
 
 .limiter-compact-footer button {
@@ -591,7 +583,7 @@ select:disabled {
 /* ---------- Mini mode ---------- */
 
 [data-mode="mini"] .limiter-monitor-page {
-  padding: 10px 14px 12px;
+  padding: 8px 14px 10px;
 }
 
 .limiter-mini-top {
@@ -615,8 +607,9 @@ select:disabled {
 
 [data-mode="mini"] .limiter-progress {
   height: 10px;
-  margin-top: auto;
-  margin-bottom: 22px;
+  /* Keep the floor-label overhang clear of the status row without creating
+     a flexible empty band in the middle of the window. */
+  margin: 8px 0 30px;
 }
 
 .limiter-mini-status {
