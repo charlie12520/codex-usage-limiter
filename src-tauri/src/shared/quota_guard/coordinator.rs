@@ -282,6 +282,24 @@ impl QuotaGuardHarness {
                         }),
                     }
                 }
+                super::reducer::ReducerEffect::VerifyNow => {
+                    let Some(workspace_id) = self.runtime.account.as_ref()
+                        .and_then(|account| account.associated_workspace_ids.first().cloned())
+                    else {
+                        continue;
+                    };
+                    if let Ok(value) = control.read_rate_limits(workspace_id).await {
+                        let prior = self.runtime.account.as_ref().and_then(|account| account.snapshot.as_ref());
+                        if let Ok(snapshot) = crate::shared::quota_guard::parser::parse_rate_limits(&value, prior, self.now_ms) {
+                            self.dispatch(super::reducer::ReducerEvent::Snapshot {
+                                snapshot,
+                                full_read: true,
+                                verification: true,
+                                now_ms: self.now_ms,
+                            });
+                        }
+                    }
+                }
                 other => self.effects.push(other),
             }
         }

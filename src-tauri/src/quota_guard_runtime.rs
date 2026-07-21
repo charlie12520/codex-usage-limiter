@@ -266,6 +266,19 @@ async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, pat
             .ok_or_else(|| "quota guard requires a connected local workspace before it can be enabled".to_string())?;
         bootstrap_workspace(handle, app, path, bindings, &workspace_id).await?;
     } else {
+        let thresholds_changed = change.previous.primary_threshold_percent != change.updated.primary_threshold_percent
+            || change.previous.secondary_threshold_percent != change.updated.secondary_threshold_percent;
+        // A raised threshold can make the snapshot that caused the parked
+        // episode healthy. Run the same authoritative read as Verify now.
+        apply_event_with_settings(
+            handle,
+            app,
+            path,
+            bindings,
+            ReducerEvent::SettingsChanged { thresholds_changed },
+            &change.updated,
+        )
+        .await?;
         synchronize_gate_with_runtime(handle, bindings).await;
     }
     Ok(())
@@ -552,6 +565,7 @@ async fn run_effect(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, 
         ReducerEffect::ScheduleProvisionalExpiry { turn, generation, terminal, deadline } =>
             schedule_event(handle, deadline, ActorEvent::ProvisionalExpiry { turn, generation, terminal }),
         ReducerEffect::ReadFullRateLimits => Box::pin(verify_once(handle, app, path, bindings, false)).await?,
+        ReducerEffect::VerifyNow => Box::pin(verify_once(handle, app, path, bindings, true)).await?,
     }
     Ok(())
 }

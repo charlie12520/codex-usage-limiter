@@ -21,6 +21,9 @@ pub(crate) enum ReducerEffect {
     ScheduleProvisionalExpiry { turn: TurnKey, generation: u64, terminal: bool, deadline: i64 },
     ScheduleInterruptCompletion { turn: TurnKey, generation: u64, operation_id: u64, attempt: u8, deadline: i64 },
     ReadFullRateLimits,
+    /// An immediate authoritative read that is allowed to release a parked
+    /// episode, just like the user-facing "Verify now" command.
+    VerifyNow,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +33,7 @@ pub(crate) enum ReducerEvent {
     TurnTerminal { turn: TurnKey, status: String, error: Option<serde_json::Value>, now_ms: i64 },
     StartResponse { request_id: u64, session_epoch: String, workspace_id: String, thread_id: Option<String>, now_ms: i64 },
     Disable { now_ms: i64 },
+    SettingsChanged { thresholds_changed: bool },
     Snapshot { snapshot: RateLimitSnapshot, full_read: bool, verification: bool, now_ms: i64 },
     ApplyActionNow { now_ms: i64 },
     FinalizeClosedEpisode { transition_id: u64, now_ms: i64 },
@@ -156,6 +160,29 @@ fn verification_at(account: &AccountRuntime, reset_grace_minutes: u16) -> Option
         .checked_add(i64::from(reset_grace_minutes).checked_mul(60_000)?)
 }
 
+fn settings_change_requires_verification(
+    account: &AccountRuntime,
+    settings: &QuotaGuardSettings,
+    thresholds_changed: bool,
+) -> bool {
+    thresholds_changed
+        && settings.armed
+        && matches!(account.phase, QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset)
+        && account.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.rate_limit_reached_type.is_none()
+                && account.breached_windows.iter().all(|kind| {
+                    snapshot.window(*kind).is_some_and(|window| {
+                        window.used_percent
+                            < match kind {
+                                QuotaWindowKind::Primary => settings.primary_threshold_percent,
+                                QuotaWindowKind::Secondary => settings.secondary_threshold_percent,
+                                QuotaWindowKind::HardLimit => 100,
+                            }
+                    })
+                })
+        })
+}
+
 fn begin_interrupting(account: &mut AccountRuntime, turns: Vec<TurnKey>, generation: u64, operation_id: u64, now_ms: i64, effects: &mut Vec<ReducerEffect>) -> Result<(), String> {
     let ack_deadline = now_ms.checked_add(INTERRUPT_ACK_TIMEOUT_MS)
         .ok_or_else(|| "interrupt acknowledgement deadline overflow".to_string())?;
@@ -258,6 +285,15 @@ pub(crate) fn reduce(mut runtime: QuotaGuardRuntimeState, event: ReducerEvent, s
                 effects.push(ReducerEffect::SetProcessOpen);
             } else {
                 effects.push(ReducerEffect::SetProcessOpen);
+            }
+        }
+        ReducerEvent::SettingsChanged { thresholds_changed } => {
+            if runtime
+                .account
+                .as_ref()
+                .is_some_and(|account| settings_change_requires_verification(account, settings, thresholds_changed))
+            {
+                effects.push(ReducerEffect::VerifyNow);
             }
         }
         ReducerEvent::PendingStartRecorded { mut start, now_ms } => {
@@ -1003,5 +1039,57 @@ mod tests {
         assert!(ready_effects.iter().any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
         let (_, disabled_effects) = reduce(runtime, ReducerEvent::Disable { now_ms: 3 }, &settings);
         assert!(disabled_effects.iter().any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
+    }
+
+    fn parked_runtime(phase: QuotaGuardPhase, used_percent: u8) -> QuotaGuardRuntimeState {
+        let mut runtime = QuotaGuardRuntimeState::default();
+        let mut account = crate::shared::quota_guard::model::AccountRuntime::new("a".into(), 10_000);
+        account.phase = phase;
+        account.verify_at = Some(100_000);
+        account.breached_windows.insert(QuotaWindowKind::Primary);
+        account.snapshot = Some(snapshot(used_percent, false));
+        runtime.account = Some(account);
+        runtime
+    }
+
+    #[test]
+    fn raised_threshold_queues_immediate_verification_for_parked_and_verifying_reset() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.primary_threshold_percent = 46;
+        for phase in [QuotaGuardPhase::Parked, QuotaGuardPhase::VerifyingReset] {
+            let (_, effects) = reduce(
+                parked_runtime(phase, 45),
+                ReducerEvent::SettingsChanged { thresholds_changed: true },
+                &settings,
+            );
+            assert_eq!(effects, vec![ReducerEffect::VerifyNow]);
+        }
+    }
+
+    #[test]
+    fn threshold_change_that_remains_breached_keeps_the_guard_parked() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.primary_threshold_percent = 44;
+        let (runtime, effects) = reduce(
+            parked_runtime(QuotaGuardPhase::Parked, 45),
+            ReducerEvent::SettingsChanged { thresholds_changed: true },
+            &settings,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Parked);
+    }
+
+    #[test]
+    fn disarmed_threshold_change_does_not_queue_verification() {
+        let mut settings = QuotaGuardSettings::default();
+        settings.armed = false;
+        settings.primary_threshold_percent = 46;
+        let (runtime, effects) = reduce(
+            parked_runtime(QuotaGuardPhase::Parked, 45),
+            ReducerEvent::SettingsChanged { thresholds_changed: true },
+            &settings,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(runtime.account.unwrap().phase, QuotaGuardPhase::Parked);
     }
 }

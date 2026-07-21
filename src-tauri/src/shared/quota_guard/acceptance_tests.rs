@@ -1,5 +1,5 @@
 use crate::shared::quota_guard::model::{
-    PendingLocalStart, QuotaAction, QuotaGuardPhase, RateLimitSnapshot, RateLimitWindow,
+    AccountRuntime, PendingLocalStart, QuotaAction, QuotaGuardPhase, QuotaWindowKind, RateLimitSnapshot, RateLimitWindow,
     TerminalObservation, TurnKey, UnmatchedStartedTurn,
 };
 use crate::shared::quota_guard::coordinator::{
@@ -1206,4 +1206,42 @@ fn stale_provisionals_expire_before_delayed_response_or_terminal_can_claim_owner
     assert!(account.local_turn_registry.is_empty());
     assert!(account.unmatched_started_turns.is_empty());
     assert!(account.terminal_observations.is_empty());
+}
+
+#[test]
+fn threshold_raise_fires_manual_verification_read_and_releases_parked_guard() {
+    tauri::async_runtime::block_on(async {
+        let mut settings = QuotaGuardSettings::default();
+        settings.primary_threshold_percent = 46;
+        let mut harness = QuotaGuardHarness::new(settings, NOW);
+        let mut account = AccountRuntime::new("account".into(), NOW);
+        account.phase = QuotaGuardPhase::Parked;
+        account.verify_at = Some(NOW + 60_000);
+        account.breached_windows.insert(QuotaWindowKind::Primary);
+        account.snapshot = Some(snapshot(45, 2_000));
+        account.associated_workspace_ids.push("workspace-1".into());
+        harness.runtime.account = Some(account);
+
+        harness.dispatch(ReducerEvent::SettingsChanged { thresholds_changed: true });
+        let control = FakeAppServerControl::default();
+        control.queue(
+            "rate:workspace-1",
+            Ok(serde_json::json!({
+                "result": {
+                    "rateLimits": {
+                        "primary": { "usedPercent": 45, "resetsAt": 2_000 },
+                        "rateLimitReachedType": null
+                    }
+                }
+            })),
+        );
+
+        harness.execute_control_effects(&control).await;
+
+        assert_eq!(control.calls(), vec![ControlCall::ReadRateLimits("workspace-1".into())]);
+        assert_eq!(harness.runtime.account.as_ref().map(|account| account.phase), Some(QuotaGuardPhase::Ready));
+        let effects = harness.take_effects();
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::ResumeExternalEngines)));
+        assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::SetProcessOpen)));
+    });
 }
