@@ -4,7 +4,9 @@ Codex Usage Limiter is an unofficial Windows desktop utility that watches the si
 
 It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMonitor). The upstream copyright and MIT license are retained. This project is not affiliated with or endorsed by OpenAI.
 
-![Compact mode](docs/screenshots/limiter-compact.png)
+[Product page](https://charlie12520.github.io/codex-usage-limiter/) · [Latest release](../../releases/latest)
+
+![Compact mode](docs/screenshots/limiter-monitor-light.png)
 
 ## What it does
 
@@ -12,8 +14,8 @@ It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMo
 - Lets you drag a grabber along the usage bar to set the floor — the bar turns red once remaining quota reaches or falls below it.
 - Fires one of three responses when remaining quota crosses the floor:
   - **Notify only** — show a native Windows notification and keep working.
-  - **Finish current turn** — block new inference, let turns active at the crossing finish, then pause.
-  - **Interrupt immediately** — block new inference and interrupt owned active turns.
+  - **Interrupt** — interrupt owned active turns and suspend matching local Codex engines for the episode.
+  - **Block** — close inference admission and keep matching local Codex engines suspended until reset verification.
 - The green titlebar switch arms/disarms responses. Disarmed, the app keeps tracking and displaying usage but takes no action.
 - Persists quota state, owned-turn identities, deadlines, and reset verification across restarts, and revalidates account identity before reopening inference.
 
@@ -29,7 +31,7 @@ Pick a size under Settings → Window size. Settings also has a **Keep in foregr
 
 Compact keeps every control on the surface. Mini is a glance card. Pill is a titlebar-less sliver you can park in a screen corner — drag anywhere on it to move it.
 
-![Settings](docs/screenshots/limiter-settings.png)
+![Settings](docs/screenshots/limiter-settings-light.png)
 
 ## Install
 

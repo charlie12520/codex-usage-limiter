@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="A small desktop utility that watches Codex quota and responds at a floor you choose."
+    />
+    <meta property="og:title" content="Codex Usage Limiter" />
+    <meta
+      property="og:description"
+      content="Watch Codex quota, set a floor, and choose what happens when usage reaches it."
+    />
+    <meta
+      property="og:image"
+      content="https://raw.githubusercontent.com/charlie12520/codex-usage-limiter/main/docs/screenshots/limiter-settings-light.png"
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>Codex Usage Limiter</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./product.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <nav class="nav shell" aria-label="Primary navigation">
+        <a class="wordmark" href="#top" aria-label="Codex Usage Limiter home">
+          <span class="wordmark-full">Codex Usage Limiter</span>
+          <span class="wordmark-short" aria-hidden="true">Usage Limiter</span>
+        </a>
+        <div class="nav-links">
+          <a href="#responses">Responses</a>
+          <a href="#limits">Limits</a>
+          <a
+            class="nav-source"
+            href="https://github.com/charlie12520/codex-usage-limiter"
+          >GitHub</a>
+        </div>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero shell" id="top">
+        <div class="hero-copy">
+          <p class="kicker">Codex desktop utility</p>
+          <h1>Set a floor for Codex usage.</h1>
+          <p class="hero-summary">
+            See what remains. Get notified, block new turns, or interrupt owned work when quota gets low.
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button button-primary"
+              href="https://github.com/charlie12520/codex-usage-limiter/releases/latest"
+            >Download for Windows</a>
+            <a
+              class="button button-secondary"
+              href="https://github.com/charlie12520/codex-usage-limiter"
+            >View source</a>
+          </div>
+        </div>
+
+        <figure class="hero-visual">
+          <div class="screenshot-stage">
+            <img
+              src="./screenshots/limiter-monitor-light.png"
+              width="844"
+              height="408"
+              alt="Codex Usage Limiter compact window in light appearance"
+              fetchpriority="high"
+            />
+          </div>
+          <figcaption>Compact view with a 29% floor.</figcaption>
+        </figure>
+      </section>
+
+      <section class="modes shell section" aria-labelledby="modes-title">
+        <div class="section-heading">
+          <h2 id="modes-title">Small enough to leave open.</h2>
+          <p>
+            Compact, Mini, and Pill views keep the remaining quota and reset time visible without taking over the desktop.
+          </p>
+        </div>
+        <div class="mode-grid">
+          <figure class="settings-figure">
+            <img
+              src="./screenshots/limiter-settings-light.png"
+              width="844"
+              height="1336"
+              alt="Codex Usage Limiter settings in light appearance"
+              loading="lazy"
+            />
+          </figure>
+          <div class="mode-copy">
+            <p>
+              Choose the window size, keep it in the foreground if useful, and start it at sign-in. Settings stay local.
+            </p>
+            <dl class="mode-list">
+              <div>
+                <dt>Compact</dt>
+                <dd>Quota, floor, response, and reset time.</dd>
+              </div>
+              <div>
+                <dt>Mini</dt>
+                <dd>A smaller glanceable card.</dd>
+              </div>
+              <div>
+                <dt>Pill</dt>
+                <dd>A narrow strip for a screen corner.</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="responses section" id="responses" aria-labelledby="responses-title">
+        <div class="shell response-layout">
+          <div class="section-heading response-heading">
+            <h2 id="responses-title">Choose the response.</h2>
+            <p>The limiter watches both Codex rate-limit windows and acts on the one closer to running out.</p>
+          </div>
+          <div class="response-list">
+            <article>
+              <h3>Notify</h3>
+              <p>Show a native notification and leave Codex running.</p>
+            </article>
+            <article>
+              <h3>Interrupt</h3>
+              <p>Interrupt owned active turns and suspend matching local Codex engines for the episode.</p>
+            </article>
+            <article>
+              <h3>Block</h3>
+              <p>Close inference admission and keep matching local Codex engines suspended until reset verification.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="mechanics shell section" aria-labelledby="mechanics-title">
+        <div class="section-heading mechanics-heading">
+          <h2 id="mechanics-title">Local, visible, reversible.</h2>
+          <p>Connect a workspace, drag the floor, pick a response, and leave the switch armed.</p>
+        </div>
+        <ol class="mechanics-list">
+          <li>
+            <span aria-hidden="true">01</span>
+            <div>
+              <h3>Connect a workspace</h3>
+              <p>The app starts a local Codex app-server session to read usage and verify the account.</p>
+            </div>
+          </li>
+          <li>
+            <span aria-hidden="true">02</span>
+            <div>
+              <h3>Set the floor</h3>
+              <p>Drag the marker to the percentage of remaining quota where the selected response should run.</p>
+            </div>
+          </li>
+          <li>
+            <span aria-hidden="true">03</span>
+            <div>
+              <h3>Wait for reset</h3>
+              <p>The limiter persists its state and verifies the account before reopening inference.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section class="limits section" id="limits" aria-labelledby="limits-title">
+        <div class="shell limits-layout">
+          <div class="section-heading limits-heading">
+            <h2 id="limits-title">What it can and cannot control.</h2>
+          </div>
+          <div class="limits-copy">
+            <p>
+              Enforcement covers Codex sessions launched through the app. Optional external suspension covers matching local, current-user desktop and CLI engines.
+            </p>
+            <p>
+              It cannot reach Codex in WSL, containers, remote machines, or the web. A server-side reply already generating may still finish and count toward usage.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="install shell section" id="install" aria-labelledby="install-title">
+        <div>
+          <h2 id="install-title">Install the first release.</h2>
+          <p>Windows 10 or 11. Codex CLI must already be installed and signed in.</p>
+        </div>
+        <a
+          class="button button-primary"
+          href="https://github.com/charlie12520/codex-usage-limiter/releases/latest"
+        >Open the release</a>
+      </section>
+    </main>
+
+    <footer class="footer shell">
+      <p>Unofficial and not affiliated with or endorsed by OpenAI.</p>
+      <div>
+        <a href="https://github.com/charlie12520/codex-usage-limiter/blob/main/LICENSE">MIT License</a>
+        <a href="https://github.com/Dimillian/CodexMonitor">Based on CodexMonitor</a>
+      </div>
+    </footer>
+  </body>
+</html>
