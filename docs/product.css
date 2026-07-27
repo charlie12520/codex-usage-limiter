@@ -426,9 +426,9 @@ h1 {
 }
 
 .install {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(320px, 1.2fr);
   align-items: center;
-  justify-content: space-between;
   gap: 3rem;
 }
 
@@ -438,6 +438,46 @@ h1 {
 
 .install p {
   margin-bottom: 0;
+}
+
+.install-panel {
+  min-width: 0;
+}
+
+.install .install-label {
+  margin-bottom: 0.65rem;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 720;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.install-command {
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-strong);
+}
+
+.install-command code {
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+}
+
+.install .install-note {
+  margin-top: 0.9rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.install-panel .button {
+  margin-top: 1.2rem;
 }
 
 .footer {
@@ -501,7 +541,7 @@ h1 {
 
   .install {
     align-items: flex-start;
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 }
 

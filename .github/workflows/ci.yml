@@ -92,6 +92,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: PowerShell installer smoke test
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: .\install.ps1 -WhatIf
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

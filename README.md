@@ -4,6 +4,16 @@ Codex Usage Limiter is an unofficial Windows desktop utility that watches the si
 
 [Product page](https://charlie12520.github.io/codex-usage-limiter/) · [Latest release](../../releases/latest)
 
+## Install on Windows
+
+In Windows PowerShell 5.1 or PowerShell 7:
+
+```powershell
+irm https://raw.githubusercontent.com/charlie12520/codex-usage-limiter/main/install.ps1 | iex
+```
+
+The bootstrapper finds the latest Windows installer, verifies its GitHub-published SHA-256 digest, and opens the per-user installer. It does not require administrator rights. You can [inspect the script](install.ps1) before running it or use the [manual downloads](../../releases/latest) instead.
+
 ![Compact mode](docs/screenshots/limiter-monitor-light.png)
 
 ## What it does
@@ -31,9 +41,9 @@ Compact keeps every control on the surface. Mini is a glance card. Pill is a tit
 
 ![Settings](docs/screenshots/limiter-settings-light.png)
 
-## Install
+## Install details
 
-Grab a build from the [latest release](../../releases/latest):
+The PowerShell command above is the shortest Windows path. Manual builds are available from the [latest release](../../releases/latest):
 
 - **Windows** (primary, fully tested): run the `-setup.exe` installer — it adds the app to the Start Menu so Windows search finds it, and installs per-user without admin rights. Prefer a portable copy instead? Grab the zip and run `codex-usage-limiter.exe` from anywhere (portable exes aren't indexed by Start Menu search). Windows 10/11.
 - **macOS** (experimental, unsigned): open the `.dmg`, drag the app to Applications, then right-click → Open the first time to get past Gatekeeper.
