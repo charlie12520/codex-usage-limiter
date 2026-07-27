@@ -28,7 +28,7 @@ jobs:
         run: npm ci
 
       - name: Build app and installer
-        run: npm run tauri -- build --bundles nsis
+        run: npm run tauri -- build --bundles nsis --features custom-protocol
 
       - name: Run backend tests
         working-directory: src-tauri
@@ -84,7 +84,7 @@ jobs:
         run: npm ci
 
       - name: Build app bundle (unsigned)
-        run: npm run tauri -- build --bundles app,dmg
+        run: npm run tauri -- build --bundles app,dmg --features custom-protocol
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -131,7 +131,7 @@ jobs:
         run: npm ci
 
       - name: Build bundles
-        run: npm run tauri -- build --bundles appimage,deb
+        run: npm run tauri -- build --bundles appimage,deb --features custom-protocol
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
