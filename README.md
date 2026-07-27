@@ -2,8 +2,6 @@
 
 Codex Usage Limiter is an unofficial Windows desktop utility that watches the signed-in Codex account's rate limits and applies a chosen response when your remaining quota reaches or drops below a floor you set.
 
-It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMonitor). The upstream copyright and MIT license are retained. This project is not affiliated with or endorsed by OpenAI.
-
 [Product page](https://charlie12520.github.io/codex-usage-limiter/) · [Latest release](../../releases/latest)
 
 ![Compact mode](docs/screenshots/limiter-monitor-light.png)
