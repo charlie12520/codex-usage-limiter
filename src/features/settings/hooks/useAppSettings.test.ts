@@ -39,15 +39,23 @@ describe("useAppSettings", () => {
       enabled: false,
       primaryThresholdPercent: 90,
       secondaryThresholdPercent: 90,
-      action: "notifyOnly",
-      drainTimeoutMinutes: 15,
-      drainTimeoutAction: "notifyAndHold",
-      resetGraceMinutes: 10,
-      notifyWhenAvailable: true,
+      rearmAfterResetPercentLeft: null,
+      action: "interrupt",
     });
     expect(
       normalizeAppSettings({ ...defaults, quotaGuard: undefined as never }).quotaGuard,
     ).toEqual(defaults.quotaGuard);
+  });
+
+  it("maps legacy and unrecognized quota actions to immediate interrupt", () => {
+    const defaults = buildDefaultSettings();
+    for (const action of ["finishCurrentTurn", "futureAction"]) {
+      const normalized = normalizeAppSettings({
+        ...defaults,
+        quotaGuard: { ...defaults.quotaGuard, action },
+      } as unknown as AppSettings);
+      expect(normalized.quotaGuard.action).toBe("interrupt");
+    }
   });
 
   it("loads settings and normalizes theme + uiScale", async () => {

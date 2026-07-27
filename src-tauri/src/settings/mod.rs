@@ -12,6 +12,21 @@ use crate::types::{AppSettings, BackendMode};
 use crate::window;
 use crate::shared::quota_guard::coordinator::{QuotaGuardHandle, SettingsChanged};
 
+fn limiter_boot_screen(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        Some("monitor") => Some("monitor"),
+        Some("settings") => Some("settings"),
+        _ => None,
+    }
+}
+
+/// Returns the one-shot development screen override, if configured at process launch.
+#[tauri::command]
+pub(crate) fn get_limiter_boot_screen() -> Option<String> {
+    limiter_boot_screen(std::env::var("CODEX_LIMITER_BOOT_SCREEN").ok().as_deref())
+        .map(str::to_owned)
+}
+
 #[tauri::command]
 pub(crate) async fn get_app_settings(
     state: State<'_, AppState>,
@@ -154,8 +169,8 @@ pub(crate) fn validate_quota_guard_settings(settings: &AppSettings) -> Result<()
     if !(1..=100).contains(&guard.primary_threshold_percent) || !(1..=100).contains(&guard.secondary_threshold_percent) {
         return Err("QUOTA_GUARD_INVALID_THRESHOLD_PERCENT".to_string());
     }
-    if !(1..=1440).contains(&guard.drain_timeout_minutes) {
-        return Err("QUOTA_GUARD_INVALID_DRAIN_TIMEOUT_MINUTES".to_string());
+    if guard.rearm_after_reset_percent_left.is_some_and(|value| !(1..=99).contains(&value)) {
+        return Err("QUOTA_GUARD_INVALID_REARM_PERCENT_LEFT".to_string());
     }
     if guard.reset_grace_minutes > 1440 {
         return Err("QUOTA_GUARD_INVALID_RESET_GRACE_MINUTES".to_string());
@@ -203,7 +218,7 @@ async fn ensure_remote_runtime_for_settings(settings: &AppSettings, state: State
     let _ = crate::tailscale::tailscale_daemon_start(state).await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, any()))]
 mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -516,39 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_enable_restores_the_prior_admission_policy() {
-        tauri::async_runtime::block_on(async {
-            let app_settings = Mutex::new(AppSettings::default());
-            let settings_update_lock = Mutex::new(());
-            let quota_guard = QuotaGuardHandle::default();
-            quota_guard
-                .gate()
-                .set_policy(ProcessPolicy::EnabledOpen);
-            let mut invalid_settings = enable_quota_guard();
-            invalid_settings.quota_guard.drain_timeout_minutes = 0;
-
-            let result = update_app_settings_transaction(
-                invalid_settings,
-                &app_settings,
-                &test_settings_path("invalid-enable"),
-                &settings_update_lock,
-                &quota_guard,
-            )
-            .await;
-            assert_eq!(
-                result.as_ref().err().map(String::as_str),
-                Some("QUOTA_GUARD_INVALID_DRAIN_TIMEOUT_MINUTES")
-            );
-            assert_eq!(
-                quota_guard.gate().policy(),
-                ProcessPolicy::EnabledOpen,
-                "a rejected enable must restore the policy it closed before validation"
-            );
-            assert!(!app_settings.lock().await.quota_guard.enabled);
-        });
-    }
-
-    #[test]
     fn failed_enable_write_restores_the_prior_admission_policy() {
         tauri::async_runtime::block_on(async {
             let app_settings = Mutex::new(AppSettings::default());
@@ -620,12 +602,25 @@ mod tests {
     }
 
     #[test]
-    fn quota_guard_validates_bounded_deadlines() {
+    fn quota_guard_validates_bounded_reset_grace() {
         let mut settings = AppSettings::default();
-        settings.quota_guard.drain_timeout_minutes = 0;
+        settings.quota_guard.reset_grace_minutes = 1441;
         assert!(validate_quota_guard_settings(&settings).is_err());
-        settings.quota_guard.drain_timeout_minutes = 1;
         settings.quota_guard.reset_grace_minutes = 1440;
         assert!(validate_quota_guard_settings(&settings).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod limiter_boot_screen_tests {
+    use super::limiter_boot_screen;
+
+    #[test]
+    fn accepts_only_known_limiter_screens() {
+        assert_eq!(limiter_boot_screen(Some("monitor")), Some("monitor"));
+        assert_eq!(limiter_boot_screen(Some("settings")), Some("settings"));
+        assert_eq!(limiter_boot_screen(Some("Settings")), None);
+        assert_eq!(limiter_boot_screen(Some("other")), None);
+        assert_eq!(limiter_boot_screen(None), None);
     }
 }

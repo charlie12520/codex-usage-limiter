@@ -1,30 +1,38 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::shared::codex_core::{account_rate_limits_core, account_read_strict_core, read_thread_core, resume_thread_core, strict_account_identity, turn_interrupt_core};
+use crate::shared::codex_core::{
+    account_rate_limits_core, account_read_strict_core, read_thread_core, resume_thread_core,
+    strict_account_identity, turn_interrupt_core,
+};
 use crate::shared::quota_guard::coordinator::{
     reason_name, ActorEvent, AdmissionProjection, AppServerControl, ControlFuture,
-    QuotaGuardCommand, QuotaGuardEvent, QuotaGuardHandle,
-    QuotaGuardPublicActivityEntry, QuotaGuardPublicState, QuotaGuardPublicTurn,
-    SettingsChanged, EVENT_CHANNEL_CAPACITY,
+    QuotaGuardCommand, QuotaGuardEvent, QuotaGuardHandle, QuotaGuardPublicActivityEntry,
+    QuotaGuardPublicState, QuotaGuardPublicSuspendedEngine, QuotaGuardPublicTurn, SettingsChanged,
+    EVENT_CHANNEL_CAPACITY,
 };
+use crate::shared::quota_guard::external_suspend;
 use crate::shared::quota_guard::gate::ProcessPolicy;
-use crate::shared::quota_guard::model::{PendingLocalStart, QuotaGuardActivityEntry, QuotaGuardActivityKind, QuotaGuardPhase, TurnKey};
+use crate::shared::quota_guard::model::{
+    PendingLocalStart, PendingThresholdSettings, QuotaGuardActivityEntry, QuotaGuardActivityKind,
+    QuotaGuardPhase, TurnKey,
+};
 use crate::shared::quota_guard::parser::parse_rate_limits;
 use crate::shared::quota_guard::persistence::{load_runtime, persist_runtime};
 use crate::shared::quota_guard::recovery::recover;
 use crate::shared::quota_guard::reducer::{reduce, ReducerEffect, ReducerEvent};
 use crate::state::AppState;
-use crate::types::QuotaGuardSettings;
+use crate::types::{AppSettings, QuotaGuardSettings};
 
-const BLOCKED_PREFIX: &str = "QUOTA_GUARD_BLOCKED";
+const THRESHOLD_SETTLE_DELAY_MS: i64 = 10_000;
+const MONITOR_POLL_INTERVAL_MS: i64 = 10_000;
 
 #[derive(Clone)]
 struct LocalAppServerControl {
@@ -33,29 +41,55 @@ struct LocalAppServerControl {
 
 impl AppServerControl for LocalAppServerControl {
     fn read_rate_limits(&self, workspace_id: String) -> ControlFuture<'_> {
-        Box::pin(async move { account_rate_limits_core(&self.app.state::<AppState>().sessions, workspace_id).await })
+        Box::pin(async move {
+            account_rate_limits_core(&self.app.state::<AppState>().sessions, workspace_id).await
+        })
     }
     fn read_identity(&self, workspace_id: String) -> ControlFuture<'_> {
-        Box::pin(async move { account_read_strict_core(&self.app.state::<AppState>().sessions, workspace_id).await })
+        Box::pin(async move {
+            account_read_strict_core(&self.app.state::<AppState>().sessions, workspace_id).await
+        })
     }
     fn interrupt_turn(&self, turn: TurnKey) -> ControlFuture<'_> {
-        Box::pin(async move { turn_interrupt_core(&self.app.state::<AppState>().sessions, turn.workspace_id, turn.thread_id, turn.turn_id).await })
+        Box::pin(async move {
+            turn_interrupt_core(
+                &self.app.state::<AppState>().sessions,
+                turn.workspace_id,
+                turn.thread_id,
+                turn.turn_id,
+            )
+            .await
+        })
     }
     fn read_thread(&self, workspace_id: String, thread_id: String) -> ControlFuture<'_> {
-        Box::pin(async move { read_thread_core(&self.app.state::<AppState>().sessions, workspace_id, thread_id).await })
+        Box::pin(async move {
+            read_thread_core(
+                &self.app.state::<AppState>().sessions,
+                workspace_id,
+                thread_id,
+            )
+            .await
+        })
     }
     fn resume_thread(&self, workspace_id: String, thread_id: String) -> ControlFuture<'_> {
-        Box::pin(async move { resume_thread_core(&self.app.state::<AppState>().sessions, workspace_id, thread_id).await })
+        Box::pin(async move {
+            resume_thread_core(
+                &self.app.state::<AppState>().sessions,
+                workspace_id,
+                thread_id,
+            )
+            .await
+        })
     }
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or_default()
 }
 impl QuotaGuardHandle {
-
     pub(crate) async fn public_state(&self) -> QuotaGuardPublicState {
         let bindings = self.inner.bindings.lock().await.clone();
         public_state_with_bindings(self, &bindings).await
@@ -65,19 +99,35 @@ impl QuotaGuardHandle {
     /// setup calls are idempotent.
     pub(crate) fn start(&self, app: AppHandle, state_path: PathBuf) {
         let (sender, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-        let mut slot = self.inner.sender.lock().expect("quota guard sender lock poisoned");
-        if slot.is_some() { return; }
+        let mut slot = self
+            .inner
+            .sender
+            .lock()
+            .expect("quota guard sender lock poisoned");
+        if slot.is_some() {
+            return;
+        }
         *slot = Some(sender);
         drop(slot);
         let handle = self.clone();
-        tauri::async_runtime::spawn(async move { actor_loop(handle, app, state_path, receiver).await; });
+        tauri::async_runtime::spawn(async move {
+            actor_loop(handle, app, state_path, receiver).await;
+        });
     }
     /// Close synchronously before an enable write so inference cannot race the
     /// transaction. The actor will establish identity before it opens permits.
-    pub(crate) async fn begin_enable(&self) { self.inner.gate.close(); }
+    pub(crate) async fn begin_enable(&self) {
+        self.inner.gate.close();
+    }
 
     pub(crate) fn rehydrate(&self) {
-        if let Some(sender) = self.inner.sender.lock().expect("quota guard sender lock poisoned").clone() {
+        if let Some(sender) = self
+            .inner
+            .sender
+            .lock()
+            .expect("quota guard sender lock poisoned")
+            .clone()
+        {
             // Startup is best-effort only because actor_loop has already
             // performed the closed recovery decision before receiving work.
             let _ = sender.try_send(ActorEvent::AppStartupRehydrate);
@@ -87,19 +137,39 @@ impl QuotaGuardHandle {
     }
 
     pub(crate) async fn settings_changed(&self, change: SettingsChanged) -> Result<(), String> {
-        let sender = self.inner.sender.lock().expect("quota guard sender lock poisoned").clone()
+        let sender = self
+            .inner
+            .sender
+            .lock()
+            .expect("quota guard sender lock poisoned")
+            .clone()
             .ok_or_else(|| "quota guard actor is unavailable".to_string())?;
         let (reply, receive) = oneshot::channel();
-        sender.send(ActorEvent::SettingsChanged(change, reply)).await.map_err(|_| "quota guard actor is unavailable".to_string())?;
-        receive.await.map_err(|_| "quota guard actor is unavailable".to_string())?
+        sender
+            .send(ActorEvent::SettingsChanged(change, reply))
+            .await
+            .map_err(|_| "quota guard actor is unavailable".to_string())?;
+        receive
+            .await
+            .map_err(|_| "quota guard actor is unavailable".to_string())?
     }
 
     async fn command(&self, command: QuotaGuardCommand) -> Result<QuotaGuardPublicState, String> {
-        let sender = self.inner.sender.lock().expect("quota guard sender lock poisoned").clone()
+        let sender = self
+            .inner
+            .sender
+            .lock()
+            .expect("quota guard sender lock poisoned")
+            .clone()
             .ok_or_else(|| "quota guard actor is unavailable".to_string())?;
         let (reply, receive) = oneshot::channel();
-        sender.send(ActorEvent::Command(command, reply)).await.map_err(|_| "quota guard actor is unavailable".to_string())?;
-        receive.await.map_err(|_| "quota guard actor is unavailable".to_string())?
+        sender
+            .send(ActorEvent::Command(command, reply))
+            .await
+            .map_err(|_| "quota guard actor is unavailable".to_string())?;
+        receive
+            .await
+            .map_err(|_| "quota guard actor is unavailable".to_string())?
     }
 
     pub(crate) async fn fail_closed(&self, message: &str) {
@@ -113,25 +183,47 @@ impl QuotaGuardHandle {
     }
 }
 
-async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut receiver: mpsc::Receiver<ActorEvent>) {
+async fn actor_loop(
+    handle: QuotaGuardHandle,
+    app: AppHandle,
+    path: PathBuf,
+    mut receiver: mpsc::Receiver<ActorEvent>,
+) {
     let settings = app.state::<AppState>().app_settings.lock().await.clone();
-    let decision = recover(settings.quota_guard.enabled, load_runtime(&path, now_ms()), now_ms());
+    let decision = recover(
+        settings.quota_guard.enabled,
+        load_runtime(&path, now_ms()),
+        now_ms(),
+    );
     handle.inner.gate.set_policy(decision.policy);
-    *handle.inner.runtime.lock().await = decision.state;
+    let runtime = restore_runtime_for_startup(decision.state, &settings.quota_guard);
+    *handle.inner.runtime.lock().await = runtime;
     if let Err(error) = persist_current(&handle, &path).await {
-        handle.fail_closed(&format!("quota guard startup persistence failed: {error}")).await;
+        handle
+            .fail_closed(&format!("quota guard startup persistence failed: {error}"))
+            .await;
     }
     emit_state(&app, &handle).await;
     // Recovery never opens a persisted guard.  Connecting the most recently
     // verified workspace is a prerequisite for the later WorkspaceBound
     // bootstrap, strict identity read, and full quota read.
     if settings.quota_guard.enabled {
-        if let Some(workspace_id) = handle.runtime().await.account
+        if let Some(workspace_id) = handle
+            .runtime()
+            .await
+            .account
             .and_then(|account| account.associated_workspace_ids.first().cloned())
         {
             let state = app.state::<AppState>();
-            if let Err(error) = crate::workspaces::connect_workspace_local(&app, &state, workspace_id).await {
-                mark_intervention(&handle, &path, &format!("quota guard startup workspace recovery failed: {error}")).await;
+            if let Err(error) =
+                crate::workspaces::connect_workspace_local(&app, &state, workspace_id).await
+            {
+                mark_intervention(
+                    &handle,
+                    &path,
+                    &format!("quota guard startup workspace recovery failed: {error}"),
+                )
+                .await;
             }
         }
     }
@@ -142,7 +234,11 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
     tauri::async_runtime::spawn(async move {
         loop {
             overflow_handle.inner.overflow_notify.notified().await;
-            if overflow_handle.inner.overflowed.swap(false, Ordering::SeqCst) {
+            if overflow_handle
+                .inner
+                .overflowed
+                .swap(false, Ordering::SeqCst)
+            {
                 mark_intervention(&overflow_handle, &overflow_path, "event channel overflow").await;
                 emit_state(&overflow_app, &overflow_handle).await;
             }
@@ -152,9 +248,12 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
     let mut bindings = HashMap::<String, (String, String)>::new();
     while let Some(event) = receiver.recv().await {
         let result = match event {
-            ActorEvent::Observed(event) => handle_observed(&handle, &app, &path, &mut bindings, event).await,
+            ActorEvent::Observed(event) => {
+                handle_observed(&handle, &app, &path, &mut bindings, event).await
+            }
             ActorEvent::ReliableObserved(event, reply) => {
-                let result = match handle_observed(&handle, &app, &path, &mut bindings, event).await {
+                let result = match handle_observed(&handle, &app, &path, &mut bindings, event).await
+                {
                     Ok(()) => persist_current(&handle, &path).await,
                     Err(error) => Err(error),
                 };
@@ -162,7 +261,8 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                 Ok(())
             }
             ActorEvent::SettingsChanged(change, reply) => {
-                let result = handle_settings_changed(&handle, &app, &path, &mut bindings, change).await;
+                let result =
+                    handle_settings_changed(&handle, &app, &path, &mut bindings, change).await;
                 let _ = reply.send(result);
                 Ok(())
             }
@@ -172,54 +272,126 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
                 Ok(())
             }
             ActorEvent::AppStartupRehydrate => {
-                let runtime = handle.runtime().await;
-                if let Some(account) = runtime.account {
-                    let generation = runtime.lifecycle_generation;
-                    if let Some(deadline) = account.drain_deadline { schedule_drain(&handle, generation, deadline); }
-                    if matches!(account.phase, QuotaGuardPhase::Parked | QuotaGuardPhase::VerifyingReset) {
-                        if let Some(verify_at) = account.verify_at { schedule_verification(&handle, generation, verify_at); }
-                    } else if account.phase == QuotaGuardPhase::Monitoring {
-                        // First read fires immediately so a fresh launch shows current
-                        // usage instead of the persisted snapshot from the last run.
-                        schedule_healthy_revalidation(&handle, generation, now_ms());
-                    }
-                    apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::RehydratePendingInterrupts { now_ms: now_ms() }).await
+                if let Err(error) = reconcile_startup_external_engines(&handle, &app, &path).await {
+                    Err(error)
                 } else {
-                    Ok(())
+                    let runtime = handle.runtime().await;
+                    if runtime.account.is_some() {
+                        let generation = runtime.lifecycle_generation;
+                        // First read fires immediately so a fresh launch shows current
+                        // usage instead of the persisted snapshot from the last run. A
+                        // parked episode still needs these reads for monitor health and
+                        // external-engine re-sweeps; reducer semantics keep its threshold
+                        // evaluation blocked until verification is due.
+                        schedule_monitor_poll_if_enabled(&handle, generation, now_ms()).await;
+                        apply_event(
+                            &handle,
+                            &app,
+                            &path,
+                            &mut bindings,
+                            ReducerEvent::RehydratePendingInterrupts { now_ms: now_ms() },
+                        )
+                        .await
+                    } else {
+                        Ok(())
+                    }
                 }
             }
-            ActorEvent::FinalizeClosedEpisode { generation } =>
-                apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: now_ms() }).await,
-            ActorEvent::DrainDeadline { generation, deadline } => {
-                if handle.runtime().await.account.as_ref().is_some_and(|account| account.drain_deadline == Some(deadline))
-                    && handle.runtime().await.lifecycle_generation == generation {
-                    apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::DrainDeadline { generation, now_ms: now_ms() }).await
-                } else { Ok(()) }
+            ActorEvent::ThresholdSettled { settles_at } => {
+                settle_pending_thresholds(&handle, &app, &path, &mut bindings, settles_at).await
             }
-            ActorEvent::Verify { generation, verify_at } => {
-                if handle.runtime().await.account.as_ref().is_some_and(|account| account.verify_at == Some(verify_at))
-                    && handle.runtime().await.lifecycle_generation == generation {
-                    verify_once(&handle, &app, &path, &mut bindings, false).await
-                } else { Ok(()) }
+            ActorEvent::FinalizeClosedEpisode { generation } => {
+                apply_event(
+                    &handle,
+                    &app,
+                    &path,
+                    &mut bindings,
+                    ReducerEvent::FinalizeClosedEpisode {
+                        transition_id: generation,
+                        now_ms: now_ms(),
+                    },
+                )
+                .await
             }
-            ActorEvent::InterruptDeadline { turn, generation, operation_id, attempt, acknowledgement } =>
-                apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::InterruptDeadline { turn, generation, operation_id, attempt, acknowledgement, now_ms: now_ms() }).await,
-            ActorEvent::StartExpiry { request_id, generation } =>
-                apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::PendingStartExpired { request_id, generation, now_ms: now_ms() }).await,
-            ActorEvent::ProvisionalExpiry { turn, generation, terminal } =>
-                apply_event(&handle, &app, &path, &mut bindings, ReducerEvent::ProvisionalExpired { turn, generation, terminal, now_ms: now_ms() }).await,
+            ActorEvent::InterruptDeadline {
+                turn,
+                generation,
+                operation_id,
+                attempt,
+                acknowledgement,
+            } => {
+                apply_event(
+                    &handle,
+                    &app,
+                    &path,
+                    &mut bindings,
+                    ReducerEvent::InterruptDeadline {
+                        turn,
+                        generation,
+                        operation_id,
+                        attempt,
+                        acknowledgement,
+                        now_ms: now_ms(),
+                    },
+                )
+                .await
+            }
+            ActorEvent::StartExpiry {
+                request_id,
+                generation,
+            } => {
+                apply_event(
+                    &handle,
+                    &app,
+                    &path,
+                    &mut bindings,
+                    ReducerEvent::PendingStartExpired {
+                        request_id,
+                        generation,
+                        now_ms: now_ms(),
+                    },
+                )
+                .await
+            }
+            ActorEvent::ProvisionalExpiry {
+                turn,
+                generation,
+                terminal,
+            } => {
+                apply_event(
+                    &handle,
+                    &app,
+                    &path,
+                    &mut bindings,
+                    ReducerEvent::ProvisionalExpired {
+                        turn,
+                        generation,
+                        terminal,
+                        now_ms: now_ms(),
+                    },
+                )
+                .await
+            }
             ActorEvent::HealthyRevalidate { generation, due_at } => {
                 let runtime = handle.runtime().await;
-                let monitoring = runtime.lifecycle_generation == generation
-                    && runtime.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Monitoring);
-                if monitoring && now_ms() >= due_at {
-                    *handle.inner.scheduled_healthy_due.lock().expect("healthy timer lock poisoned") = None;
+                let pollable = monitor_pollable(&runtime, generation);
+                let due = now_ms() >= due_at;
+                if due {
+                    *handle
+                        .inner
+                        .scheduled_healthy_due
+                        .lock()
+                        .expect("healthy timer lock poisoned") = None;
+                }
+                if pollable && due {
                     match healthy_revalidate(&handle, &app, &path, &mut bindings).await {
                         Ok(()) => {
-                            let runtime = handle.runtime().await;
-                            if runtime.lifecycle_generation == generation && runtime.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Monitoring) {
-                                schedule_healthy_revalidation(&handle, generation, now_ms().saturating_add(10_000));
-                            }
+                            schedule_monitor_poll_if_enabled(
+                                &handle,
+                                generation,
+                                now_ms().saturating_add(MONITOR_POLL_INTERVAL_MS),
+                            )
+                            .await;
                             Ok(())
                         }
                         Err(error) => Err(error),
@@ -231,15 +403,73 @@ async fn actor_loop(handle: QuotaGuardHandle, app: AppHandle, path: PathBuf, mut
         };
         if let Err(error) = result {
             mark_intervention(&handle, &path, &error).await;
+            let runtime = handle.runtime().await;
+            schedule_monitor_poll_if_enabled(
+                &handle,
+                runtime.lifecycle_generation,
+                now_ms().saturating_add(MONITOR_POLL_INTERVAL_MS),
+            )
+            .await;
         }
         *handle.inner.bindings.lock().await = bindings.clone();
         emit_state(&app, &handle).await;
     }
     handle.inner.gate.close();
 }
-async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, change: SettingsChanged) -> Result<(), String> {
+
+/// The app settings file is authoritative after a completed threshold update.
+/// Keep an in-flight debounce's durable effective settings, but do not let an
+/// older completed value control the first post-restart snapshot evaluation.
+fn restore_runtime_for_startup(
+    mut runtime: crate::shared::quota_guard::model::QuotaGuardRuntimeState,
+    settings: &QuotaGuardSettings,
+) -> crate::shared::quota_guard::model::QuotaGuardRuntimeState {
+    if runtime.pending_thresholds.is_none() || runtime.effective_settings.is_none() {
+        runtime.effective_settings = Some(settings.clone());
+    }
+    runtime
+}
+
+async fn handle_settings_changed(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    change: SettingsChanged,
+) -> Result<(), String> {
+    let (change, schedule_at) = prepare_settings_change(handle, change, now_ms()).await;
+    persist_current(handle, path).await?;
+    apply_effective_settings_changed(handle, app, path, bindings, change).await?;
+    if let Some(settles_at) = schedule_at {
+        schedule_threshold_settle(handle, settles_at)?;
+    }
+    Ok(())
+}
+
+async fn apply_effective_settings_changed(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    change: SettingsChanged,
+) -> Result<(), String> {
+    if (change.previous.external_suspend && !change.updated.external_suspend)
+        || (change.previous.armed && !change.updated.armed)
+    {
+        resume_external_engines(handle, path).await?;
+        // The episode policy is durable so later blocked snapshots cannot
+        // refreeze a process that was just intentionally resumed.
+        disable_external_suspension_for_active_episode(handle, path).await?;
+    }
     if !change.updated.enabled {
-        apply_event(handle, app, path, bindings, ReducerEvent::Disable { now_ms: now_ms() }).await?;
+        apply_event(
+            handle,
+            app,
+            path,
+            bindings,
+            ReducerEvent::Disable { now_ms: now_ms() },
+        )
+        .await?;
         handle.inner.gate.set_policy(ProcessPolicy::DisabledOpen);
         return Ok(());
     }
@@ -249,18 +479,146 @@ async fn handle_settings_changed(handle: &QuotaGuardHandle, app: &AppHandle, pat
         // fresh full quota snapshot have passed through this closed bootstrap.
         handle.inner.gate.close();
         persist_current(handle, path).await?;
-        let workspace_id = bindings.keys().next().cloned()
-            .ok_or_else(|| "quota guard requires a connected local workspace before it can be enabled".to_string())?;
+        let workspace_id = bindings.keys().next().cloned().ok_or_else(|| {
+            "quota guard requires a connected local workspace before it can be enabled".to_string()
+        })?;
         bootstrap_workspace(handle, app, path, bindings, &workspace_id).await?;
-    } else {
+    } else if change.previous != change.updated {
+        let thresholds_changed = change.previous.primary_threshold_percent
+            != change.updated.primary_threshold_percent
+            || change.previous.secondary_threshold_percent
+                != change.updated.secondary_threshold_percent;
+        // A raised threshold can make the snapshot that caused the parked
+        // episode healthy. Run the same authoritative read as Verify now.
+        apply_event_with_settings(
+            handle,
+            app,
+            path,
+            bindings,
+            ReducerEvent::SettingsChanged { thresholds_changed },
+            &change.updated,
+        )
+        .await?;
         synchronize_gate_with_runtime(handle, bindings).await;
     }
     Ok(())
 }
 
-async fn synchronize_gate_with_runtime(handle: &QuotaGuardHandle, bindings: &HashMap<String, (String, String)>) {
-    let phase = handle.runtime().await.account.as_ref().map(|account| account.phase);
-    if matches!(phase, Some(QuotaGuardPhase::Monitoring | QuotaGuardPhase::Ready)) {
+/// Stores UI threshold drafts durably, but holds the coordinator at its last
+/// effective thresholds until the draft has remained unchanged for ten seconds.
+/// Non-threshold settings are copied into the effective value immediately.
+async fn prepare_settings_change(
+    handle: &QuotaGuardHandle,
+    requested: SettingsChanged,
+    now: i64,
+) -> (SettingsChanged, Option<i64>) {
+    let mut runtime = handle.inner.runtime.lock().await;
+    let previous = runtime
+        .effective_settings
+        .clone()
+        .unwrap_or_else(|| requested.previous.clone());
+    let requested_thresholds_changed = requested.previous.primary_threshold_percent
+        != requested.updated.primary_threshold_percent
+        || requested.previous.secondary_threshold_percent
+            != requested.updated.secondary_threshold_percent;
+    let mut updated = requested.updated;
+    let mut schedule_at = None;
+
+    if requested_thresholds_changed {
+        if updated.primary_threshold_percent == previous.primary_threshold_percent
+            && updated.secondary_threshold_percent == previous.secondary_threshold_percent
+        {
+            runtime.pending_thresholds = None;
+        } else {
+            let settles_at = now.saturating_add(THRESHOLD_SETTLE_DELAY_MS);
+            runtime.pending_thresholds = Some(PendingThresholdSettings {
+                primary_threshold_percent: updated.primary_threshold_percent,
+                secondary_threshold_percent: updated.secondary_threshold_percent,
+                settles_at,
+            });
+            updated.primary_threshold_percent = previous.primary_threshold_percent;
+            updated.secondary_threshold_percent = previous.secondary_threshold_percent;
+            schedule_at = Some(settles_at);
+        }
+    } else if let Some(pending) = runtime.pending_thresholds.as_ref() {
+        updated.primary_threshold_percent = previous.primary_threshold_percent;
+        updated.secondary_threshold_percent = previous.secondary_threshold_percent;
+        schedule_at = Some(pending.settles_at);
+    }
+
+    runtime.effective_settings = Some(updated.clone());
+    (SettingsChanged { previous, updated }, schedule_at)
+}
+
+async fn settle_pending_thresholds(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    settles_at: i64,
+) -> Result<(), String> {
+    if let Some(change) = take_settled_threshold_change(handle, settles_at).await? {
+        apply_effective_settings_changed(handle, app, path, bindings, change).await?;
+    }
+    Ok(())
+}
+
+async fn take_settled_threshold_change(
+    handle: &QuotaGuardHandle,
+    settles_at: i64,
+) -> Result<Option<SettingsChanged>, String> {
+    let mut runtime = handle.inner.runtime.lock().await;
+    let Some(pending) = runtime
+        .pending_thresholds
+        .clone()
+        .filter(|pending| pending.settles_at == settles_at)
+    else {
+        return Ok(None);
+    };
+    let previous = runtime
+        .effective_settings
+        .clone()
+        .ok_or_else(|| "quota guard effective settings are unavailable".to_string())?;
+    let mut updated = previous.clone();
+    updated.primary_threshold_percent = pending.primary_threshold_percent;
+    updated.secondary_threshold_percent = pending.secondary_threshold_percent;
+    runtime.effective_settings = Some(updated.clone());
+    runtime.pending_thresholds = None;
+    Ok(Some(SettingsChanged { previous, updated }))
+}
+
+fn schedule_threshold_settle(handle: &QuotaGuardHandle, settles_at: i64) -> Result<(), String> {
+    let sender = handle
+        .inner
+        .sender
+        .lock()
+        .expect("quota guard sender lock poisoned")
+        .clone()
+        .ok_or_else(|| "quota guard actor is unavailable".to_string())?;
+    tauri::async_runtime::spawn(async move {
+        let delay = settles_at.saturating_sub(now_ms());
+        tokio::time::sleep(Duration::from_millis(
+            u64::try_from(delay).unwrap_or_default(),
+        ))
+        .await;
+        let _ = sender
+            .send(ActorEvent::ThresholdSettled { settles_at })
+            .await;
+    });
+    Ok(())
+}
+
+async fn synchronize_gate_with_runtime(
+    handle: &QuotaGuardHandle,
+    bindings: &HashMap<String, (String, String)>,
+) {
+    let phase = handle
+        .runtime()
+        .await
+        .account
+        .as_ref()
+        .map(|account| account.phase);
+    if matches!(phase, Some(QuotaGuardPhase::Monitoring)) {
         handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
         for (workspace_id, (epoch, _)) in bindings {
             handle.inner.gate.set_epoch_open(epoch, workspace_id, true);
@@ -270,45 +628,147 @@ async fn synchronize_gate_with_runtime(handle: &QuotaGuardHandle, bindings: &Has
     }
 }
 
-async fn handle_observed(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, event: QuotaGuardEvent) -> Result<(), String> {
+async fn handle_observed(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    event: QuotaGuardEvent,
+) -> Result<(), String> {
     match event {
-        QuotaGuardEvent::WorkspaceBound { session_epoch, workspace_id, canonical_codex_home } => {
-            handle.inner.gate.register_closed_epoch(session_epoch.clone(), workspace_id.clone());
+        QuotaGuardEvent::WorkspaceBound {
+            session_epoch,
+            workspace_id,
+            canonical_codex_home,
+        } => {
+            handle
+                .inner
+                .gate
+                .register_closed_epoch(session_epoch.clone(), workspace_id.clone());
             bindings.insert(workspace_id.clone(), (session_epoch, canonical_codex_home));
-            if app.state::<AppState>().app_settings.lock().await.quota_guard.enabled {
+            if app
+                .state::<AppState>()
+                .app_settings
+                .lock()
+                .await
+                .quota_guard
+                .enabled
+            {
                 bootstrap_workspace(handle, app, path, bindings, &workspace_id).await?;
             }
+            if let Some(pending) = handle.runtime().await.pending_thresholds {
+                schedule_threshold_settle(handle, pending.settles_at)?;
+            }
         }
-        QuotaGuardEvent::WorkspaceDisconnected { session_epoch, workspace_id } => {
-            handle.inner.gate.revoke_epoch(&session_epoch, &workspace_id);
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
+        QuotaGuardEvent::WorkspaceDisconnected {
+            session_epoch,
+            workspace_id,
+        } => {
+            handle
+                .inner
+                .gate
+                .revoke_epoch(&session_epoch, &workspace_id);
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
                 bindings.remove(&workspace_id);
                 if handle.inner.gate.policy() != ProcessPolicy::DisabledOpen {
                     mark_intervention(handle, path, "guarded workspace disconnected").await;
                 }
             }
         }
-        QuotaGuardEvent::RateLimits { session_epoch, workspace_id, value } => {
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
-                apply_rate_limits(handle, app, path, bindings, &workspace_id, value, false, false).await?;
+        QuotaGuardEvent::RateLimits {
+            session_epoch,
+            workspace_id,
+            value,
+        } => {
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
+                apply_rate_limits(
+                    handle,
+                    app,
+                    path,
+                    bindings,
+                    &workspace_id,
+                    value,
+                    false,
+                    false,
+                )
+                .await?;
             }
         }
-        QuotaGuardEvent::TurnStarted { session_epoch, workspace_id, thread_id, turn_id } => {
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
-                apply_event(handle, app, path, bindings, ReducerEvent::TurnStarted {
-                    turn: TurnKey { session_epoch, workspace_id, thread_id, turn_id }, now_ms: now_ms(),
-                }).await?;
+        QuotaGuardEvent::TurnStarted {
+            session_epoch,
+            workspace_id,
+            thread_id,
+            turn_id,
+        } => {
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
+                apply_event(
+                    handle,
+                    app,
+                    path,
+                    bindings,
+                    ReducerEvent::TurnStarted {
+                        turn: TurnKey {
+                            session_epoch,
+                            workspace_id,
+                            thread_id,
+                            turn_id,
+                        },
+                        now_ms: now_ms(),
+                    },
+                )
+                .await?;
             }
         }
-        QuotaGuardEvent::TurnCompleted { session_epoch, workspace_id, thread_id, turn_id, status, error } => {
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
-                apply_event(handle, app, path, bindings, ReducerEvent::TurnTerminal {
-                    turn: TurnKey { session_epoch, workspace_id, thread_id, turn_id }, status, error, now_ms: now_ms(),
-                }).await?;
+        QuotaGuardEvent::TurnCompleted {
+            session_epoch,
+            workspace_id,
+            thread_id,
+            turn_id,
+            status,
+            error,
+        } => {
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
+                apply_event(
+                    handle,
+                    app,
+                    path,
+                    bindings,
+                    ReducerEvent::TurnTerminal {
+                        turn: TurnKey {
+                            session_epoch,
+                            workspace_id,
+                            thread_id,
+                            turn_id,
+                        },
+                        status,
+                        error,
+                        now_ms: now_ms(),
+                    },
+                )
+                .await?;
             }
         }
-        QuotaGuardEvent::AccountIdentityChanged { session_epoch, workspace_id, reason } => {
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
+        QuotaGuardEvent::AccountIdentityChanged {
+            session_epoch,
+            workspace_id,
+            reason,
+        } => {
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
                 handle.inner.gate.set_policy(ProcessPolicy::EnabledClosed);
                 bootstrap_workspace(handle, app, path, bindings, &workspace_id)
                     .await
@@ -316,174 +776,493 @@ async fn handle_observed(handle: &QuotaGuardHandle, app: &AppHandle, path: &Path
             }
         }
         QuotaGuardEvent::PendingLocalStart {
-            request_id, session_epoch, workspace_id, request_thread_id, expected_thread_id, request_kind,
+            request_id,
+            session_epoch,
+            workspace_id,
+            request_thread_id,
+            expected_thread_id,
+            request_kind,
         } => {
-            if !bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
+            if !bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
                 return Ok(());
             }
             let start = PendingLocalStart {
-                request_id, session_epoch, workspace_id, request_thread_id, expected_thread_id, request_kind,
-                response_thread_id: None, response_received_at: None,
+                request_id,
+                session_epoch,
+                workspace_id,
+                request_thread_id,
+                expected_thread_id,
+                request_kind,
+                response_thread_id: None,
+                response_received_at: None,
                 generation: handle.runtime().await.lifecycle_generation,
-                disposition: None, registered_at: now_ms(),
+                disposition: None,
+                registered_at: now_ms(),
             };
-            apply_event(handle, app, path, bindings, ReducerEvent::PendingStartRecorded { start, now_ms: now_ms() }).await?;
+            apply_event(
+                handle,
+                app,
+                path,
+                bindings,
+                ReducerEvent::PendingStartRecorded {
+                    start,
+                    now_ms: now_ms(),
+                },
+            )
+            .await?;
         }
-        QuotaGuardEvent::StartFailed { request_id, session_epoch, workspace_id, .. } => {
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
+        QuotaGuardEvent::StartFailed {
+            request_id,
+            session_epoch,
+            workspace_id,
+            ..
+        } => {
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
                 let generation = handle.runtime().await.lifecycle_generation;
-                apply_event(handle, app, path, bindings, ReducerEvent::PendingStartFailed { request_id, generation, now_ms: now_ms() }).await?;
+                apply_event(
+                    handle,
+                    app,
+                    path,
+                    bindings,
+                    ReducerEvent::PendingStartFailed {
+                        request_id,
+                        generation,
+                        now_ms: now_ms(),
+                    },
+                )
+                .await?;
             }
         }
-        QuotaGuardEvent::StartResponse { request_id, session_epoch, workspace_id, value, .. } => {
-            if bindings.get(&workspace_id).is_some_and(|(epoch, _)| epoch == &session_epoch) {
-                apply_event(handle, app, path, bindings, ReducerEvent::StartResponse {
-                    request_id, session_epoch, workspace_id, thread_id: response_thread_id(&value), now_ms: now_ms(),
-                }).await?;
+        QuotaGuardEvent::StartResponse {
+            request_id,
+            session_epoch,
+            workspace_id,
+            value,
+            ..
+        } => {
+            if bindings
+                .get(&workspace_id)
+                .is_some_and(|(epoch, _)| epoch == &session_epoch)
+            {
+                apply_event(
+                    handle,
+                    app,
+                    path,
+                    bindings,
+                    ReducerEvent::StartResponse {
+                        request_id,
+                        session_epoch,
+                        workspace_id,
+                        thread_id: response_thread_id(&value),
+                        now_ms: now_ms(),
+                    },
+                )
+                .await?;
             }
         }
     }
     Ok(())
 }
 
-async fn bootstrap_workspace(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, workspace_id: &str) -> Result<(), String> {
-    let Some((epoch, home)) = bindings.get(workspace_id).cloned() else { return Err("workspace binding missing for quota bootstrap".into()); };
+async fn bootstrap_workspace(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    workspace_id: &str,
+) -> Result<(), String> {
+    let Some((epoch, home)) = bindings.get(workspace_id).cloned() else {
+        return Err("workspace binding missing for quota bootstrap".into());
+    };
     handle.inner.gate.set_policy(ProcessPolicy::EnabledClosed);
     let control = LocalAppServerControl { app: app.clone() };
     let identity = control.read_identity(workspace_id.to_string()).await?;
-    let identity = strict_account_identity(&identity).ok_or_else(|| "account/read returned no strict identity".to_string())?;
+    let identity = strict_account_identity(&identity)
+        .ok_or_else(|| "account/read returned no strict identity".to_string())?;
     let account_key = account_key(&home, &identity);
     let current = handle.runtime().await;
-    match current.account.as_ref().map(|account| (account.account_key.as_str(), account.phase)) {
-        Some((existing, _)) if existing != account_key => return Err("strict account identity changed; disable and re-enable quota guard".into()),
+    match current
+        .account
+        .as_ref()
+        .map(|account| (account.account_key.as_str(), account.phase))
+    {
+        Some((existing, _)) if existing != account_key => {
+            return Err("strict account identity changed; disable and re-enable quota guard".into())
+        }
         None | Some((_, QuotaGuardPhase::Disabled)) => {
-            let settings = app.state::<AppState>().app_settings.lock().await.quota_guard.clone();
-            apply_event_with_settings(handle, app, path, bindings, ReducerEvent::Enable { account_key, now_ms: now_ms() }, &settings).await?;
+            let settings = effective_settings(handle, app).await;
+            apply_event_with_settings(
+                handle,
+                app,
+                path,
+                bindings,
+                ReducerEvent::Enable {
+                    account_key,
+                    now_ms: now_ms(),
+                },
+                &settings,
+            )
+            .await?;
         }
         _ => {}
     }
     let rate_limits = control.read_rate_limits(workspace_id.to_string()).await?;
-    apply_rate_limits(handle, app, path, bindings, workspace_id, rate_limits, true, false).await?;
+    apply_rate_limits(
+        handle,
+        app,
+        path,
+        bindings,
+        workspace_id,
+        rate_limits,
+        true,
+        false,
+    )
+    .await?;
     {
         let mut runtime = handle.inner.runtime.lock().await;
         if let Some(account) = runtime.account.as_mut() {
-            account.associated_workspace_ids.retain(|id| id != workspace_id);
-            account.associated_workspace_ids.insert(0, workspace_id.to_string());
+            account
+                .associated_workspace_ids
+                .retain(|id| id != workspace_id);
+            account
+                .associated_workspace_ids
+                .insert(0, workspace_id.to_string());
             account.updated_at = now_ms();
         }
     }
-    let persisted_turns = handle.runtime().await.account.map(|account| {
-        account.local_turn_registry.into_iter()
-            .chain(account.allowed_drain_turns)
-            .chain(account.pending_interrupt_index.into_values().map(|pending| pending.turn))
-            .collect::<Vec<_>>()
-    }).unwrap_or_default();
+    let persisted_turns = handle
+        .runtime()
+        .await
+        .account
+        .map(|account| {
+            account
+                .local_turn_registry
+                .into_iter()
+                .chain(
+                    account
+                        .pending_interrupt_index
+                        .into_values()
+                        .map(|pending| pending.turn),
+                )
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     for turn in persisted_turns {
-        let active = control.read_thread(turn.workspace_id.clone(), turn.thread_id.clone()).await?;
+        let active = control
+            .read_thread(turn.workspace_id.clone(), turn.thread_id.clone())
+            .await?;
         if active_turn_id(&active).as_deref() != Some(turn.turn_id.as_str()) {
-            apply_event(handle, app, path, bindings, ReducerEvent::TurnTerminal {
-                turn, status: "reconciled".into(), error: None, now_ms: now_ms(),
-            }).await?;
+            apply_event(
+                handle,
+                app,
+                path,
+                bindings,
+                ReducerEvent::TurnTerminal {
+                    turn,
+                    status: "reconciled".into(),
+                    error: None,
+                    now_ms: now_ms(),
+                },
+            )
+            .await?;
         }
     }
     persist_current(handle, path).await?;
     let runtime = handle.runtime().await;
-    if runtime.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Monitoring) {
-        schedule_healthy_revalidation(handle, runtime.lifecycle_generation, now_ms().saturating_add(10_000));
+    schedule_monitor_poll_if_enabled(
+        handle,
+        runtime.lifecycle_generation,
+        now_ms().saturating_add(MONITOR_POLL_INTERVAL_MS),
+    )
+    .await;
+    if handle.inner.gate.policy() == ProcessPolicy::EnabledOpen {
+        handle.inner.gate.set_epoch_open(&epoch, workspace_id, true);
     }
-    if handle.inner.gate.policy() == ProcessPolicy::EnabledOpen { handle.inner.gate.set_epoch_open(&epoch, workspace_id, true); }
     Ok(())
 }
 
-async fn apply_rate_limits(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, _workspace_id: &str, value: Value, full_read: bool, verification: bool) -> Result<(), String> {
-    let prior = handle.runtime().await.account.and_then(|account| account.snapshot);
+async fn apply_rate_limits(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    _workspace_id: &str,
+    value: Value,
+    full_read: bool,
+    verification: bool,
+) -> Result<(), String> {
+    let prior = handle
+        .runtime()
+        .await
+        .account
+        .and_then(|account| account.snapshot);
     let snapshot = parse_rate_limits(&value, prior.as_ref(), now_ms())?;
-    let settings = app.state::<AppState>().app_settings.lock().await.quota_guard.clone();
-    apply_event_with_settings(handle, app, path, bindings, ReducerEvent::Snapshot {
-        snapshot,
-        full_read,
-        verification,
-        now_ms: now_ms(),
-    }, &settings).await
+    let settings = effective_settings(handle, app).await;
+    apply_event_with_settings(
+        handle,
+        app,
+        path,
+        bindings,
+        ReducerEvent::Snapshot {
+            snapshot,
+            full_read,
+            verification,
+            now_ms: now_ms(),
+        },
+        &settings,
+    )
+    .await
 }
 
-
-async fn apply_event(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, event: ReducerEvent) -> Result<(), String> {
-    let settings = app.state::<AppState>().app_settings.lock().await.quota_guard.clone();
+async fn apply_event(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    event: ReducerEvent,
+) -> Result<(), String> {
+    let settings = effective_settings(handle, app).await;
     apply_event_with_settings(handle, app, path, bindings, event, &settings).await
 }
 
-async fn apply_event_with_settings(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, event: ReducerEvent, settings: &QuotaGuardSettings) -> Result<(), String> {
+async fn effective_settings(handle: &QuotaGuardHandle, app: &AppHandle) -> QuotaGuardSettings {
+    if let Some(settings) = handle.runtime().await.effective_settings {
+        return settings;
+    }
+    // This fallback is only for a just-created or legacy runtime before actor
+    // startup has persisted its initial effective settings.
+    app.state::<AppState>()
+        .app_settings
+        .lock()
+        .await
+        .quota_guard
+        .clone()
+}
+
+async fn apply_event_with_settings(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    event: ReducerEvent,
+    settings: &QuotaGuardSettings,
+) -> Result<(), String> {
     let current = handle.runtime().await;
     let (next, effects) = reduce(current, event, settings);
     close_enforcement_before_persistence(handle, &effects);
     *handle.inner.runtime.lock().await = next;
     persist_current(handle, path).await?;
-    for effect in effects { run_effect(handle, app, path, bindings, effect).await?; }
+    for effect in effects {
+        run_effect(handle, app, path, bindings, effect).await?;
+    }
     Ok(())
 }
 
 fn close_enforcement_before_persistence(handle: &QuotaGuardHandle, effects: &[ReducerEffect]) {
-    if effects.iter().any(|effect| matches!(effect, ReducerEffect::SetProcessClosed)) {
-        // Closing admission is the sole intentional pre-persistence effect:
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, ReducerEffect::SetProcessClosed))
+    {
+        // Admission closure is the sole intentional pre-persistence effect:
         // once an enforcement transition is selected, no later request may
         // acquire an admission while the durable record is being written.
         handle.inner.gate.close();
     }
 }
 
-fn enqueue_finalization_after_admissions(handle: &QuotaGuardHandle, generation: u64) -> Result<(), String> {
-    let sender = handle.inner.sender.lock().expect("quota guard sender lock poisoned").clone()
+fn enqueue_finalization_after_admissions(
+    handle: &QuotaGuardHandle,
+    generation: u64,
+) -> Result<(), String> {
+    let sender = handle
+        .inner
+        .sender
+        .lock()
+        .expect("quota guard sender lock poisoned")
+        .clone()
         .ok_or_else(|| "quota guard actor is unavailable".to_string())?;
     let waiter = handle.clone();
     tauri::async_runtime::spawn(async move {
         waiter.inner.gate.wait_for_admissions().await;
-        let _ = sender.send(ActorEvent::FinalizeClosedEpisode { generation }).await;
+        let _ = sender
+            .send(ActorEvent::FinalizeClosedEpisode { generation })
+            .await;
     });
     Ok(())
 }
 
-async fn run_effect(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, effect: ReducerEffect) -> Result<(), String> {
+async fn run_effect(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    effect: ReducerEffect,
+) -> Result<(), String> {
     match effect {
         ReducerEffect::SetProcessClosed => handle.inner.gate.close(),
+        ReducerEffect::SuspendExternalEngines => {
+            suspend_external_engines(handle, app, path, true).await?
+        }
+        ReducerEffect::MaintainExternalEngineSuspension {
+            prevent_new_sessions,
+        } => suspend_external_engines(handle, app, path, prevent_new_sessions).await?,
+        ReducerEffect::ResumeExternalEngines => resume_external_engines(handle, path).await?,
         ReducerEffect::SetProcessOpen => {
             handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
-            for (workspace_id, (epoch, _)) in bindings.iter() { handle.inner.gate.set_epoch_open(epoch, workspace_id, true); }
-            let ready = handle.runtime().await.account.as_ref().is_some_and(|account| account.phase == QuotaGuardPhase::Ready);
-            let notify_when_available = app.state::<AppState>().app_settings.lock().await.quota_guard.notify_when_available;
-            if ready && notify_when_available {
-                let _ = crate::notifications::notify_quota_available(app, "Quota guard ready", "Quota limits have been verified healthy.", "quota-guard");
+            for (workspace_id, (epoch, _)) in bindings.iter() {
+                handle.inner.gate.set_epoch_open(epoch, workspace_id, true);
             }
+        }
+        ReducerEffect::PersistDisarmed => {
+            let state = app.state::<AppState>();
+            let mut settings = state.app_settings.lock().await.clone();
+            settings.quota_guard.armed = false;
+            let saved = crate::shared::settings_core::update_app_settings_core(
+                settings,
+                &state.app_settings,
+                &state.settings_path,
+            )
+            .await?;
+            handle.inner.runtime.lock().await.effective_settings = Some(saved.quota_guard);
+        }
+        ReducerEffect::RaiseThresholds { used_percent } => {
+            let state = app.state::<AppState>();
+            let mut settings = state.app_settings.lock().await.clone();
+            settings.quota_guard.primary_threshold_percent = used_percent;
+            settings.quota_guard.secondary_threshold_percent = used_percent;
+            let saved = crate::shared::settings_core::update_app_settings_core(
+                settings,
+                &state.app_settings,
+                &state.settings_path,
+            )
+            .await?;
+            handle.inner.runtime.lock().await.effective_settings = Some(saved.quota_guard);
+        }
+        ReducerEffect::PersistAutoRearm { threshold_percent } => {
+            let state = app.state::<AppState>();
+            persist_auto_rearm_settings(
+                handle,
+                &state.app_settings,
+                &state.settings_update_lock,
+                &state.settings_path,
+                threshold_percent,
+            )
+            .await?;
         }
         ReducerEffect::FinalizeClosedEpisode { transition_id } => {
             enqueue_finalization_after_admissions(handle, transition_id)?;
         }
-        ReducerEffect::Interrupt { turn, generation, operation_id, attempt } => {
-            append_activity(handle, path, QuotaGuardActivityKind::InterruptRequested, Some(operation_id), Some(&turn), None).await?;
+        ReducerEffect::Interrupt {
+            turn,
+            generation,
+            operation_id,
+            attempt,
+        } => {
+            append_activity(
+                handle,
+                path,
+                QuotaGuardActivityKind::InterruptRequested,
+                Some(operation_id),
+                Some(&turn),
+                None,
+            )
+            .await?;
             let control = LocalAppServerControl { app: app.clone() };
             match control.interrupt_turn(turn.clone()).await {
                 Ok(_) => {
-                    Box::pin(apply_event(handle, app, path, bindings, ReducerEvent::InterruptAcknowledged {
-                        turn: turn.clone(), generation, operation_id, attempt, now_ms: now_ms(),
-                    })).await?;
-                    append_activity(handle, path, QuotaGuardActivityKind::InterruptAcknowledged, Some(operation_id), Some(&turn), None).await?;
+                    Box::pin(apply_event(
+                        handle,
+                        app,
+                        path,
+                        bindings,
+                        ReducerEvent::InterruptAcknowledged {
+                            turn: turn.clone(),
+                            generation,
+                            operation_id,
+                            attempt,
+                            now_ms: now_ms(),
+                        },
+                    ))
+                    .await?;
+                    append_activity(
+                        handle,
+                        path,
+                        QuotaGuardActivityKind::InterruptAcknowledged,
+                        Some(operation_id),
+                        Some(&turn),
+                        None,
+                    )
+                    .await?;
                 }
                 Err(_) => {
-                    Box::pin(apply_event(handle, app, path, bindings, ReducerEvent::InterruptRequestFailed {
-                        turn, generation, operation_id, attempt, now_ms: now_ms(),
-                    })).await?;
+                    Box::pin(apply_event(
+                        handle,
+                        app,
+                        path,
+                        bindings,
+                        ReducerEvent::InterruptRequestFailed {
+                            turn,
+                            generation,
+                            operation_id,
+                            attempt,
+                            now_ms: now_ms(),
+                        },
+                    ))
+                    .await?;
                 }
             }
         }
-        ReducerEffect::ReconcileThread { turn, generation, operation_id, attempt } => {
+        ReducerEffect::ReconcileThread {
+            turn,
+            generation,
+            operation_id,
+            attempt,
+        } => {
             let control = LocalAppServerControl { app: app.clone() };
-            match control.read_thread(turn.workspace_id.clone(), turn.thread_id.clone()).await {
-                Ok(value) => Box::pin(apply_event(handle, app, path, bindings, ReducerEvent::InterruptReconciled {
-                    active_turn_id: active_turn_id(&value), turn, generation, operation_id, attempt, now_ms: now_ms(),
-                })).await?,
-                Err(reason) => Box::pin(apply_event(handle, app, path, bindings, ReducerEvent::InterruptReconcileFailed {
-                    turn, generation, operation_id, attempt, reason, now_ms: now_ms(),
-                })).await?,
+            match control
+                .read_thread(turn.workspace_id.clone(), turn.thread_id.clone())
+                .await
+            {
+                Ok(value) => {
+                    Box::pin(apply_event(
+                        handle,
+                        app,
+                        path,
+                        bindings,
+                        ReducerEvent::InterruptReconciled {
+                            active_turn_id: active_turn_id(&value),
+                            turn,
+                            generation,
+                            operation_id,
+                            attempt,
+                            now_ms: now_ms(),
+                        },
+                    ))
+                    .await?
+                }
+                Err(reason) => {
+                    Box::pin(apply_event(
+                        handle,
+                        app,
+                        path,
+                        bindings,
+                        ReducerEvent::InterruptReconcileFailed {
+                            turn,
+                            generation,
+                            operation_id,
+                            attempt,
+                            reason,
+                            now_ms: now_ms(),
+                        },
+                    ))
+                    .await?
+                }
             }
         }
         ReducerEffect::Notify { episode } => {
@@ -491,58 +1270,175 @@ async fn run_effect(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, 
                 let runtime = handle.runtime().await;
                 let account = runtime.account.as_ref();
                 match &episode {
-                    crate::shared::quota_guard::model::EpisodeKey::HardLimit { .. } => {
-                        ("hard limit", 100, 100, "after the next verified reset".to_string())
-                    }
-                    crate::shared::quota_guard::model::EpisodeKey::Threshold { window, threshold_percent, resets_at, .. } => {
+                    crate::shared::quota_guard::model::EpisodeKey::HardLimit { .. } => (
+                        "hard limit",
+                        100,
+                        100,
+                        "after the next verified reset".to_string(),
+                    ),
+                    crate::shared::quota_guard::model::EpisodeKey::Threshold {
+                        window,
+                        threshold_percent,
+                        resets_at,
+                        ..
+                    } => {
                         let window_name = match window {
-                            crate::shared::quota_guard::model::QuotaWindowKind::Primary => "primary window",
-                            crate::shared::quota_guard::model::QuotaWindowKind::Secondary => "secondary window",
-                            crate::shared::quota_guard::model::QuotaWindowKind::HardLimit => "hard limit",
+                            crate::shared::quota_guard::model::QuotaWindowKind::Primary => {
+                                "primary window"
+                            }
+                            crate::shared::quota_guard::model::QuotaWindowKind::Secondary => {
+                                "secondary window"
+                            }
+                            crate::shared::quota_guard::model::QuotaWindowKind::HardLimit => {
+                                "hard limit"
+                            }
                         };
                         let observed_percent = account
                             .and_then(|account| account.snapshot.as_ref())
                             .and_then(|snapshot| snapshot.window(*window))
                             .map(|window| window.used_percent)
                             .unwrap_or(*threshold_percent);
-                        let reset_time = resets_at.map(|seconds| {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|elapsed| elapsed.as_secs() as i64)
-                                .unwrap_or(0);
-                            let minutes = ((seconds - now).max(0) + 59) / 60;
-                            let (days, hours, mins) = (minutes / 1440, (minutes % 1440) / 60, minutes % 60);
-                            if days > 0 { format!("in {days}d {hours}h {mins}m") }
-                            else if hours > 0 { format!("in {hours}h {mins}m") }
-                            else { format!("in {mins}m") }
-                        }).unwrap_or_else(|| "when the quota service reports a reset".into());
-                        (window_name, observed_percent, *threshold_percent, reset_time)
+                        let reset_time = resets_at
+                            .map(|seconds| {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|elapsed| elapsed.as_secs() as i64)
+                                    .unwrap_or(0);
+                                let minutes = ((seconds - now).max(0) + 59) / 60;
+                                let (days, hours, mins) =
+                                    (minutes / 1440, (minutes % 1440) / 60, minutes % 60);
+                                if days > 0 {
+                                    format!("in {days}d {hours}h {mins}m")
+                                } else if hours > 0 {
+                                    format!("in {hours}h {mins}m")
+                                } else {
+                                    format!("in {mins}m")
+                                }
+                            })
+                            .unwrap_or_else(|| "when the quota service reports a reset".into());
+                        (
+                            window_name,
+                            observed_percent,
+                            *threshold_percent,
+                            reset_time,
+                        )
                     }
                 }
             };
-            let body = crate::notifications::quota_guard_breach_body(window_name, observed_percent, threshold_percent, &reset_time);
-            match crate::notifications::notify_quota_breach(app, "Quota guard action required", &body, "quota-guard") {
-                Ok(()) => append_activity(handle, path, QuotaGuardActivityKind::NotificationSent, None, None, None).await?,
-                Err(error) => append_activity(handle, path, QuotaGuardActivityKind::NotificationFailed, None, None, Some(error)).await?,
+            let body = crate::notifications::quota_guard_breach_body(
+                window_name,
+                observed_percent,
+                threshold_percent,
+                &reset_time,
+            );
+            match crate::notifications::notify_quota_breach(
+                app,
+                "Quota guard action required",
+                &body,
+                "quota-guard",
+            ) {
+                Ok(()) => {
+                    append_activity(
+                        handle,
+                        path,
+                        QuotaGuardActivityKind::NotificationSent,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?
+                }
+                Err(error) => {
+                    append_activity(
+                        handle,
+                        path,
+                        QuotaGuardActivityKind::NotificationFailed,
+                        None,
+                        None,
+                        Some(error),
+                    )
+                    .await?
+                }
             }
         }
-        ReducerEffect::ScheduleDrain { generation, deadline } => schedule_drain(handle, generation, deadline),
-        ReducerEffect::ScheduleVerification { generation, verify_at } => schedule_verification(handle, generation, verify_at),
-        ReducerEffect::ScheduleInterruptAck { turn, generation, operation_id, attempt, deadline } =>
-            schedule_event(handle, deadline, ActorEvent::InterruptDeadline { turn, generation, operation_id, attempt, acknowledgement: true }),
-        ReducerEffect::ScheduleInterruptCompletion { turn, generation, operation_id, attempt, deadline } =>
-            schedule_event(handle, deadline, ActorEvent::InterruptDeadline { turn, generation, operation_id, attempt, acknowledgement: false }),
-        ReducerEffect::ScheduleStartExpiry { request_id, generation, deadline } =>
-            schedule_event(handle, deadline, ActorEvent::StartExpiry { request_id, generation }),
-        ReducerEffect::ScheduleProvisionalExpiry { turn, generation, terminal, deadline } =>
-            schedule_event(handle, deadline, ActorEvent::ProvisionalExpiry { turn, generation, terminal }),
-        ReducerEffect::ReadFullRateLimits => Box::pin(verify_once(handle, app, path, bindings, false)).await?,
+        ReducerEffect::ScheduleInterruptAck {
+            turn,
+            generation,
+            operation_id,
+            attempt,
+            deadline,
+        } => schedule_event(
+            handle,
+            deadline,
+            ActorEvent::InterruptDeadline {
+                turn,
+                generation,
+                operation_id,
+                attempt,
+                acknowledgement: true,
+            },
+        ),
+        ReducerEffect::ScheduleInterruptCompletion {
+            turn,
+            generation,
+            operation_id,
+            attempt,
+            deadline,
+        } => schedule_event(
+            handle,
+            deadline,
+            ActorEvent::InterruptDeadline {
+                turn,
+                generation,
+                operation_id,
+                attempt,
+                acknowledgement: false,
+            },
+        ),
+        ReducerEffect::ScheduleStartExpiry {
+            request_id,
+            generation,
+            deadline,
+        } => schedule_event(
+            handle,
+            deadline,
+            ActorEvent::StartExpiry {
+                request_id,
+                generation,
+            },
+        ),
+        ReducerEffect::ScheduleProvisionalExpiry {
+            turn,
+            generation,
+            terminal,
+            deadline,
+        } => schedule_event(
+            handle,
+            deadline,
+            ActorEvent::ProvisionalExpiry {
+                turn,
+                generation,
+                terminal,
+            },
+        ),
+        ReducerEffect::ReadFullRateLimits => {
+            Box::pin(verify_once(handle, app, path, bindings, false)).await?
+        }
+        ReducerEffect::VerifyNow => {
+            Box::pin(verify_once(handle, app, path, bindings, true)).await?
+        }
     }
     Ok(())
 }
 
 fn schedule_event(handle: &QuotaGuardHandle, deadline: i64, event: ActorEvent) {
-    if let Some(sender) = handle.inner.sender.lock().expect("quota guard sender lock poisoned").clone() {
+    if let Some(sender) = handle
+        .inner
+        .sender
+        .lock()
+        .expect("quota guard sender lock poisoned")
+        .clone()
+    {
         let wait = u64::try_from(deadline.saturating_sub(now_ms())).unwrap_or_default();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
@@ -551,42 +1447,107 @@ fn schedule_event(handle: &QuotaGuardHandle, deadline: i64, event: ActorEvent) {
     }
 }
 
-fn schedule_drain(handle: &QuotaGuardHandle, generation: u64, deadline: i64) {
-    schedule_event(handle, deadline, ActorEvent::DrainDeadline { generation, deadline });
-}
-
-fn schedule_verification(handle: &QuotaGuardHandle, generation: u64, verify_at: i64) {
-    schedule_event(handle, verify_at, ActorEvent::Verify { generation, verify_at });
-}
-
 fn schedule_healthy_revalidation(handle: &QuotaGuardHandle, generation: u64, due_at: i64) {
-    let mut scheduled = handle.inner.scheduled_healthy_due.lock().expect("healthy timer lock poisoned");
+    let mut scheduled = handle
+        .inner
+        .scheduled_healthy_due
+        .lock()
+        .expect("healthy timer lock poisoned");
     if scheduled.is_some() {
         return;
     }
     *scheduled = Some(due_at);
     drop(scheduled);
-    schedule_event(handle, due_at, ActorEvent::HealthyRevalidate { generation, due_at });
+    schedule_event(
+        handle,
+        due_at,
+        ActorEvent::HealthyRevalidate { generation, due_at },
+    );
 }
 
-async fn verify_once(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, manual: bool) -> Result<(), String> {
-    let workspace_id = handle.runtime().await.account.and_then(|account| account.associated_workspace_ids.first().cloned())
+fn monitor_polling_enabled(phase: QuotaGuardPhase) -> bool {
+    phase != QuotaGuardPhase::Disabled
+}
+
+fn monitor_pollable(
+    runtime: &crate::shared::quota_guard::model::QuotaGuardRuntimeState,
+    generation: u64,
+) -> bool {
+    runtime.lifecycle_generation == generation
+        && runtime
+            .account
+            .as_ref()
+            .is_some_and(|account| monitor_polling_enabled(account.phase))
+}
+
+async fn schedule_monitor_poll_if_enabled(
+    handle: &QuotaGuardHandle,
+    generation: u64,
+    due_at: i64,
+) -> bool {
+    if monitor_pollable(&handle.runtime().await, generation) {
+        schedule_healthy_revalidation(handle, generation, due_at);
+        true
+    } else {
+        false
+    }
+}
+
+async fn verify_once(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    manual: bool,
+) -> Result<(), String> {
+    let workspace_id = handle
+        .runtime()
+        .await
+        .account
+        .and_then(|account| account.associated_workspace_ids.first().cloned())
         .ok_or_else(|| "quota guard has no associated workspace for verification".to_string())?;
     let control = LocalAppServerControl { app: app.clone() };
     let value = control.read_rate_limits(workspace_id.clone()).await?;
-    apply_rate_limits(handle, app, path, bindings, &workspace_id, value, true, manual).await
+    apply_rate_limits(
+        handle,
+        app,
+        path,
+        bindings,
+        &workspace_id,
+        value,
+        true,
+        manual,
+    )
+    .await
 }
 
-async fn healthy_revalidate(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>) -> Result<(), String> {
-    let (workspace_id, expected_account_key, canonical_home) = {
+async fn healthy_revalidate(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+) -> Result<(), String> {
+    let (workspace_id, expected_account_key) = {
         let runtime = handle.runtime().await;
-        let account = runtime.account.ok_or_else(|| "quota guard has no account for identity revalidation".to_string())?;
-        let workspace_id = account.associated_workspace_ids.first().cloned()
-            .ok_or_else(|| "quota guard has no associated workspace for identity revalidation".to_string())?;
-        let canonical_home = bindings.get(&workspace_id).map(|(_, home)| home.clone())
-            .ok_or_else(|| "quota guard workspace binding missing for identity revalidation".to_string())?;
-        (workspace_id, account.account_key, canonical_home)
+        let account = runtime
+            .account
+            .ok_or_else(|| "quota guard has no account for identity revalidation".to_string())?;
+        let workspace_id = account
+            .associated_workspace_ids
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                "quota guard has no associated workspace for identity revalidation".to_string()
+            })?;
+        (workspace_id, account.account_key)
     };
+    restore_workspace_binding_for_revalidation(handle, app, bindings, &workspace_id).await?;
+    let canonical_home = bindings
+        .get(&workspace_id)
+        .map(|(_, home)| home.clone())
+        .ok_or_else(|| {
+            "quota guard workspace binding missing after revalidation recovery".to_string()
+        })?;
     let control = LocalAppServerControl { app: app.clone() };
     let identity = strict_account_identity(&control.read_identity(workspace_id.clone()).await?)
         .ok_or_else(|| "account/read returned no strict identity".to_string())?;
@@ -594,31 +1555,414 @@ async fn healthy_revalidate(handle: &QuotaGuardHandle, app: &AppHandle, path: &P
         return Err("strict account identity changed during healthy revalidation".into());
     }
     let value = control.read_rate_limits(workspace_id.clone()).await?;
-    apply_rate_limits(handle, app, path, bindings, &workspace_id, value, true, false).await
+    apply_rate_limits(
+        handle,
+        app,
+        path,
+        bindings,
+        &workspace_id,
+        value,
+        true,
+        false,
+    )
+    .await
 }
 
-async fn handle_command(handle: &QuotaGuardHandle, app: &AppHandle, path: &PathBuf, bindings: &mut HashMap<String, (String, String)>, command: QuotaGuardCommand) -> Result<QuotaGuardPublicState, String> {
+/// The monitor can outlive an app-server session (for example after a real
+/// quota-window reset). Recreate the binding before strict identity reads so a
+/// transient missing session heals through the normal app-server path instead
+/// of leaving the guard in intervention-required.
+async fn restore_workspace_binding_for_revalidation(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    bindings: &mut HashMap<String, (String, String)>,
+    workspace_id: &str,
+) -> Result<(), String> {
+    if bindings.contains_key(workspace_id) {
+        return Ok(());
+    }
+
+    let state = app.state::<AppState>();
+    let has_session = state.sessions.lock().await.contains_key(workspace_id);
+    if !has_session {
+        crate::workspaces::connect_workspace_local(app, &state, workspace_id.to_string()).await?;
+    }
+    let session = state
+        .sessions
+        .lock()
+        .await
+        .get(workspace_id)
+        .cloned()
+        .ok_or_else(|| {
+            "quota guard could not restore its workspace session for identity revalidation"
+                .to_string()
+        })?;
+    if !session.is_workspace_bound(workspace_id).await {
+        return Err(
+            "quota guard restored a workspace session without an active binding".to_string(),
+        );
+    }
+
+    let epoch = session.session_epoch().to_string();
+    let canonical_home = session.canonical_codex_home().to_string();
+    handle
+        .inner
+        .gate
+        .register_closed_epoch(epoch.clone(), workspace_id.to_string());
+    bindings.insert(workspace_id.to_string(), (epoch, canonical_home));
+    Ok(())
+}
+
+async fn persist_auto_rearm_settings(
+    handle: &QuotaGuardHandle,
+    app_settings: &Mutex<AppSettings>,
+    settings_update_lock: &Mutex<()>,
+    settings_path: &PathBuf,
+    threshold_percent: u8,
+) -> Result<QuotaGuardSettings, String> {
+    // Use the same transaction lock as settings UI writes. This makes the
+    // auto-rearm update the last durable threshold decision for its actor
+    // event, rather than racing a stale full-settings request.
+    let _settings_transaction = settings_update_lock.lock().await;
+    let mut settings = app_settings.lock().await.clone();
+    settings.quota_guard.primary_threshold_percent = threshold_percent;
+    settings.quota_guard.secondary_threshold_percent = threshold_percent;
+    settings.quota_guard.armed = true;
+    crate::storage::write_settings(settings_path, &settings)?;
+    *app_settings.lock().await = settings.clone();
+
+    // A pending UI threshold debounce is an older intent. Leaving it alive
+    // lets ThresholdSettled replace this rearm in effective settings after the
+    // durable write has completed.
+    let mut runtime = handle.inner.runtime.lock().await;
+    runtime.effective_settings = Some(settings.quota_guard.clone());
+    runtime.pending_thresholds = None;
+    Ok(settings.quota_guard)
+}
+
+async fn handle_command(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    bindings: &mut HashMap<String, (String, String)>,
+    command: QuotaGuardCommand,
+) -> Result<QuotaGuardPublicState, String> {
     match command {
-        QuotaGuardCommand::ApplyActionNow => apply_event(handle, app, path, bindings, ReducerEvent::ApplyActionNow { now_ms: now_ms() }).await?,
-        QuotaGuardCommand::KeepWaiting => apply_event(handle, app, path, bindings, ReducerEvent::KeepWaiting { now_ms: now_ms() }).await?,
-        QuotaGuardCommand::InterruptNow => {
-            apply_event(handle, app, path, bindings, ReducerEvent::ForceInterrupt { now_ms: now_ms() }).await?;
+        QuotaGuardCommand::ApplyActionNow => {
+            apply_event(
+                handle,
+                app,
+                path,
+                bindings,
+                ReducerEvent::ApplyActionNow { now_ms: now_ms() },
+            )
+            .await?
         }
         QuotaGuardCommand::VerifyNow => verify_once(handle, app, path, bindings, true).await?,
+        QuotaGuardCommand::Rearm => {
+            apply_event(
+                handle,
+                app,
+                path,
+                bindings,
+                ReducerEvent::Rearm { now_ms: now_ms() },
+            )
+            .await?;
+        }
         QuotaGuardCommand::RetryClosed => {
             handle.inner.gate.set_policy(ProcessPolicy::EnabledClosed);
+            resume_external_engines(handle, path).await?;
             verify_once(handle, app, path, bindings, true).await?;
+        }
+        QuotaGuardCommand::Resume => {
+            apply_event(
+                handle,
+                app,
+                path,
+                bindings,
+                ReducerEvent::Resume { now_ms: now_ms() },
+            )
+            .await?;
         }
     }
     Ok(public_state_with_bindings(handle, bindings).await)
 }
 
-async fn append_activity(handle: &QuotaGuardHandle, path: &PathBuf, kind: QuotaGuardActivityKind, operation_id: Option<u64>, turn: Option<&TurnKey>, message: Option<String>) -> Result<(), String> {
+fn external_suspension_phase(phase: QuotaGuardPhase) -> bool {
+    matches!(phase, QuotaGuardPhase::Tripped)
+}
+
+async fn owned_session_pids(app: &AppHandle) -> HashSet<u32> {
+    let sessions = app
+        .state::<AppState>()
+        .sessions
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut pids = HashSet::new();
+    for session in sessions {
+        if let Some(pid) = session.child.lock().await.id() {
+            pids.insert(pid);
+        }
+    }
+    pids
+}
+
+async fn push_external_activity(
+    handle: &QuotaGuardHandle,
+    path: &PathBuf,
+    kind: QuotaGuardActivityKind,
+    messages: Vec<String>,
+) -> Result<(), String> {
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let mut runtime = handle.inner.runtime.lock().await;
+    if let Some(account) = runtime.account.as_mut() {
+        for message in messages {
+            account.push_activity(QuotaGuardActivityEntry {
+                id: None,
+                kind,
+                timestamp: now_ms(),
+                operation_id: None,
+                workspace_id: None,
+                thread_id: None,
+                turn_id: None,
+                attempt: None,
+                message: Some(message),
+            });
+        }
+    }
+    drop(runtime);
+    persist_current(handle, path).await
+}
+
+async fn suspend_external_engines(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+    prevent_new_sessions: bool,
+) -> Result<(), String> {
+    let prior = handle
+        .runtime()
+        .await
+        .account
+        .map(|account| account.suspended_external_engines)
+        .unwrap_or_default();
+    let (live, stale) = external_suspend::live_entries(&prior);
+    let known = live
+        .iter()
+        .map(|entry| (entry.pid, entry.process_start_time))
+        .collect::<HashSet<_>>();
+    let result = if prevent_new_sessions {
+        external_suspend::sweep(owned_session_pids(app).await, &known, now_ms())
+    } else {
+        external_suspend::SweepResult::default()
+    };
+    if live != prior || !result.suspended.is_empty() {
+        let mut runtime = handle.inner.runtime.lock().await;
+        if let Some(account) = runtime.account.as_mut() {
+            account.suspended_external_engines =
+                external_suspend::merge_suspended_entries(&live, &result.suspended);
+        }
+        drop(runtime);
+        persist_current(handle, path).await?;
+    }
+    push_external_activity(
+        handle,
+        path,
+        QuotaGuardActivityKind::ExternalEngineSkipped,
+        stale,
+    )
+    .await?;
+    push_external_activity(
+        handle,
+        path,
+        QuotaGuardActivityKind::ExternalEngineSuspended,
+        result
+            .suspended
+            .iter()
+            .map(|engine| format!("suspended {} ({})", engine.image_path, engine.pid))
+            .collect(),
+    )
+    .await?;
+    push_external_activity(
+        handle,
+        path,
+        QuotaGuardActivityKind::ExternalEngineSkipped,
+        result.skipped,
+    )
+    .await
+}
+
+async fn resume_external_engines(handle: &QuotaGuardHandle, path: &PathBuf) -> Result<(), String> {
+    let entries = handle
+        .runtime()
+        .await
+        .account
+        .map(|account| account.suspended_external_engines)
+        .unwrap_or_default();
+    let (live, stale) = external_suspend::live_entries(&entries);
+    let result = external_suspend::resume(&live);
+    let mut runtime = handle.inner.runtime.lock().await;
+    if let Some(account) = runtime.account.as_mut() {
+        // Stale identities and successful resumes are removed. Permission
+        // failures remain durable so a later explicit resolve/shutdown can retry.
+        account.suspended_external_engines = external_suspend::remaining_after_resume(
+            &account.suspended_external_engines,
+            &live,
+            &result.resumed,
+        );
+    }
+    drop(runtime);
+    persist_current(handle, path).await?;
+    push_external_activity(
+        handle,
+        path,
+        QuotaGuardActivityKind::ExternalEngineResumed,
+        result
+            .resumed
+            .iter()
+            .map(|engine| format!("resumed {} ({})", engine.image_path, engine.pid))
+            .collect(),
+    )
+    .await?;
+    let mut skipped = stale;
+    skipped.extend(result.skipped);
+    push_external_activity(
+        handle,
+        path,
+        QuotaGuardActivityKind::ExternalEngineSkipped,
+        skipped,
+    )
+    .await
+}
+
+async fn disable_external_suspension_for_active_episode(
+    handle: &QuotaGuardHandle,
+    path: &PathBuf,
+) -> Result<(), String> {
+    let mut runtime = handle.inner.runtime.lock().await;
+    let Some(policy) = runtime
+        .account
+        .as_mut()
+        .and_then(|account| account.episode_policy.as_mut())
+    else {
+        return Ok(());
+    };
+    if !policy.external_suspend && !policy.prevent_new_sessions {
+        return Ok(());
+    }
+    policy.external_suspend = false;
+    policy.prevent_new_sessions = false;
+    drop(runtime);
+    persist_current(handle, path).await
+}
+
+async fn reconcile_startup_external_engines(
+    handle: &QuotaGuardHandle,
+    app: &AppHandle,
+    path: &PathBuf,
+) -> Result<(), String> {
+    let runtime = handle.runtime().await;
+    let Some(account) = runtime.account else {
+        return Ok(());
+    };
+    let plan = external_suspend::startup_reconcile_plan(
+        external_suspension_phase(account.phase),
+        account
+            .episode_policy
+            .as_ref()
+            .is_some_and(|policy| policy.external_suspend),
+        account
+            .episode_policy
+            .as_ref()
+            .is_some_and(|policy| policy.prevent_new_sessions),
+    );
+    if plan.resuspend_persisted {
+        let (live, skipped) = external_suspend::live_entries(&account.suspended_external_engines);
+        // Shutdown intentionally resumes these processes so the app can exit.
+        // A still-active episode must freeze those exact trip-time identities
+        // again on rehydrate even when newcomer prevention is disabled.
+        let resuspended = external_suspend::resuspend(&live);
+        let known = live
+            .iter()
+            .map(|entry| (entry.pid, entry.process_start_time))
+            .collect::<HashSet<_>>();
+        let newcomers = if plan.sweep_newcomers {
+            external_suspend::sweep(owned_session_pids(app).await, &known, now_ms())
+        } else {
+            external_suspend::SweepResult::default()
+        };
+        let mut next = handle.inner.runtime.lock().await;
+        if let Some(account) = next.account.as_mut() {
+            account.suspended_external_engines =
+                external_suspend::merge_suspended_entries(&live, &newcomers.suspended);
+        }
+        drop(next);
+        persist_current(handle, path).await?;
+        push_external_activity(
+            handle,
+            path,
+            QuotaGuardActivityKind::ExternalEngineSkipped,
+            skipped,
+        )
+        .await?;
+        push_external_activity(
+            handle,
+            path,
+            QuotaGuardActivityKind::ExternalEngineSuspended,
+            resuspended
+                .suspended
+                .iter()
+                .chain(newcomers.suspended.iter())
+                .map(|engine| format!("suspended {} ({})", engine.image_path, engine.pid))
+                .collect(),
+        )
+        .await?;
+        let mut skipped = resuspended.skipped;
+        skipped.extend(newcomers.skipped);
+        push_external_activity(
+            handle,
+            path,
+            QuotaGuardActivityKind::ExternalEngineSkipped,
+            skipped,
+        )
+        .await
+    } else {
+        resume_external_engines(handle, path).await
+    }
+}
+
+pub(crate) async fn resume_external_engines_for_shutdown(
+    handle: &QuotaGuardHandle,
+    path: &PathBuf,
+) {
+    let _ = resume_external_engines(handle, path).await;
+}
+
+async fn append_activity(
+    handle: &QuotaGuardHandle,
+    path: &PathBuf,
+    kind: QuotaGuardActivityKind,
+    operation_id: Option<u64>,
+    turn: Option<&TurnKey>,
+    message: Option<String>,
+) -> Result<(), String> {
     let mut runtime = handle.inner.runtime.lock().await;
     if let Some(account) = runtime.account.as_mut() {
         account.push_activity(QuotaGuardActivityEntry {
-            id: None, kind, timestamp: now_ms(), operation_id,
-            workspace_id: turn.map(|value| value.workspace_id.clone()), thread_id: turn.map(|value| value.thread_id.clone()), turn_id: turn.map(|value| value.turn_id.clone()), attempt: None, message,
+            id: None,
+            kind,
+            timestamp: now_ms(),
+            operation_id,
+            workspace_id: turn.map(|value| value.workspace_id.clone()),
+            thread_id: turn.map(|value| value.thread_id.clone()),
+            turn_id: turn.map(|value| value.turn_id.clone()),
+            attempt: None,
+            message,
         });
     }
     drop(runtime);
@@ -641,20 +1985,99 @@ async fn mark_intervention(handle: &QuotaGuardHandle, path: &PathBuf, message: &
     drop(runtime);
     let _ = persist_current(handle, path).await;
 }
-async fn public_state_with_bindings(handle: &QuotaGuardHandle, bindings: &HashMap<String, (String, String)>) -> QuotaGuardPublicState {
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_rearm_durably_replaces_a_pending_stale_threshold_settle() {
+        tauri::async_runtime::block_on(async {
+            let temp_dir = std::env::temp_dir().join(format!(
+                "codex-monitor-auto-rearm-runtime-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&temp_dir).expect("create test directory");
+            let settings_path = temp_dir.join("settings.json");
+            let app_settings = Mutex::new(AppSettings::default());
+            {
+                let mut settings = app_settings.lock().await;
+                settings.quota_guard.armed = false;
+                settings.quota_guard.primary_threshold_percent = 57;
+                settings.quota_guard.secondary_threshold_percent = 57;
+            }
+            crate::storage::write_settings(&settings_path, &*app_settings.lock().await)
+                .expect("persist initial settings");
+
+            let handle = QuotaGuardHandle::default();
+            let settles_at = 123_456;
+            {
+                let mut runtime = handle.inner.runtime.lock().await;
+                runtime.effective_settings = Some(app_settings.lock().await.quota_guard.clone());
+                runtime.pending_thresholds = Some(PendingThresholdSettings {
+                    primary_threshold_percent: 57,
+                    secondary_threshold_percent: 57,
+                    settles_at,
+                });
+            }
+            let settings_update_lock = Mutex::new(());
+
+            persist_auto_rearm_settings(
+                &handle,
+                &app_settings,
+                &settings_update_lock,
+                &settings_path,
+                75,
+            )
+            .await
+            .expect("persist automatic rearm");
+
+            assert!(
+                take_settled_threshold_change(&handle, settles_at)
+                    .await
+                    .expect("inspect stale settle")
+                    .is_none(),
+                "the stale ThresholdSettled event must be a no-op"
+            );
+            let durable = crate::storage::read_settings(&settings_path).expect("read settings");
+            assert!(durable.quota_guard.armed);
+            assert_eq!(durable.quota_guard.primary_threshold_percent, 75);
+            assert_eq!(durable.quota_guard.secondary_threshold_percent, 75);
+            let runtime = handle.runtime().await;
+            let effective = runtime.effective_settings.expect("effective settings");
+            assert!(effective.armed);
+            assert_eq!(effective.primary_threshold_percent, 75);
+            assert_eq!(effective.secondary_threshold_percent, 75);
+            assert!(runtime.pending_thresholds.is_none());
+
+            let _ = std::fs::remove_dir_all(temp_dir);
+        });
+    }
+}
+
+async fn public_state_with_bindings(
+    handle: &QuotaGuardHandle,
+    bindings: &HashMap<String, (String, String)>,
+) -> QuotaGuardPublicState {
     let mut workspace_ids = handle.inner.configured_workspaces.lock().await.clone();
     workspace_ids.extend(bindings.keys().cloned());
     let mut admission_by_workspace = BTreeMap::new();
     for workspace_id in workspace_ids {
         let (session_epoch, status) = match bindings.get(&workspace_id) {
-            Some((epoch, _)) => (Some(epoch.clone()), handle.inner.gate.status(Some(epoch), &workspace_id)),
+            Some((epoch, _)) => (
+                Some(epoch.clone()),
+                handle.inner.gate.status(Some(epoch), &workspace_id),
+            ),
             None => (None, handle.inner.gate.status(None, &workspace_id)),
         };
-        admission_by_workspace.insert(workspace_id, AdmissionProjection {
-            session_epoch,
-            open: status.open,
-            reason: reason_name(status.reason).to_string(),
-        });
+        admission_by_workspace.insert(
+            workspace_id,
+            AdmissionProjection {
+                session_epoch,
+                open: status.open,
+                reason: reason_name(status.reason).to_string(),
+            },
+        );
     }
     let runtime = handle.runtime().await;
     let Some(account) = runtime.account.as_ref() else {
@@ -666,20 +2089,21 @@ async fn public_state_with_bindings(handle: &QuotaGuardHandle, bindings: &HashMa
             snapshot_fresh: false,
             breached_windows: Vec::new(),
             affected_turns: Vec::new(),
-            drain_deadline: None,
-            verify_at: None,
             monitor_healthy: true,
             last_error: None,
+            suspended_external_engines: Vec::new(),
             activity: Vec::new(),
             admission_by_workspace,
         };
     };
     let mut seen_turns = HashSet::new();
     let mut affected_turns = Vec::new();
-    for turn in account.local_turn_registry.iter()
-        .chain(account.allowed_drain_turns.iter())
-        .chain(account.pending_interrupt_index.values().map(|pending| &pending.turn))
-    {
+    for turn in account.local_turn_registry.iter().chain(
+        account
+            .pending_interrupt_index
+            .values()
+            .map(|pending| &pending.turn),
+    ) {
         if seen_turns.insert(turn.stable_id()) {
             affected_turns.push(QuotaGuardPublicTurn {
                 workspace_id: turn.workspace_id.clone(),
@@ -694,38 +2118,84 @@ async fn public_state_with_bindings(handle: &QuotaGuardHandle, bindings: &HashMa
         account_label: None,
         phase: account.phase,
         snapshot: account.snapshot.clone(),
-        snapshot_fresh: account.snapshot.as_ref().is_some_and(|snapshot| snapshot.is_fresh_at(now_ms())),
+        snapshot_fresh: account
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.is_fresh_at(now_ms())),
         breached_windows: account.breached_windows.iter().copied().collect(),
         affected_turns,
-        drain_deadline: account.drain_deadline,
-        verify_at: account.verify_at,
         monitor_healthy: account.monitor_healthy,
         last_error: account.last_error.clone(),
-        activity: account.activity_entries.iter().map(|entry| QuotaGuardPublicActivityEntry {
-            id: entry.id.clone(),
-            kind: entry.kind,
-            timestamp: entry.timestamp,
-            operation_id: entry.operation_id.map(|value| value.to_string()),
-            workspace_id: entry.workspace_id.clone(),
-            thread_id: entry.thread_id.clone(),
-            turn_id: entry.turn_id.clone(),
-            attempt: entry.attempt,
-            message: entry.message.clone(),
-        }).collect(),
+        suspended_external_engines: account
+            .suspended_external_engines
+            .iter()
+            .map(|engine| QuotaGuardPublicSuspendedEngine {
+                pid: engine.pid,
+                image_path: engine.image_path.clone(),
+                suspended_at: engine.suspended_at,
+            })
+            .collect(),
+        activity: account
+            .activity_entries
+            .iter()
+            .map(|entry| QuotaGuardPublicActivityEntry {
+                id: entry.id.clone(),
+                kind: entry.kind,
+                timestamp: entry.timestamp,
+                operation_id: entry.operation_id.map(|value| value.to_string()),
+                workspace_id: entry.workspace_id.clone(),
+                thread_id: entry.thread_id.clone(),
+                turn_id: entry.turn_id.clone(),
+                attempt: entry.attempt,
+                message: entry.message.clone(),
+            })
+            .collect(),
         admission_by_workspace,
     }
 }
 
 async fn emit_state(app: &AppHandle, handle: &QuotaGuardHandle) {
-    let workspace_ids = app.state::<AppState>().workspaces.lock().await.keys().cloned().collect();
+    let workspace_ids = app
+        .state::<AppState>()
+        .workspaces
+        .lock()
+        .await
+        .keys()
+        .cloned()
+        .collect();
     handle.set_configured_workspaces(workspace_ids).await;
-    let _ = app.emit("quota-guard-state-changed", handle.public_state().await);
+    let public_state = handle.public_state().await;
+    crate::limiter_shell::set_tray_guard_tripped(
+        app,
+        matches!(
+            public_state.phase,
+            QuotaGuardPhase::Tripped | QuotaGuardPhase::InterventionRequired
+        ) || !public_state.suspended_external_engines.is_empty()
+            || public_state
+                .admission_by_workspace
+                .values()
+                .any(|admission| !admission.open),
+    );
+    let _ = app.emit("quota-guard-state-changed", public_state);
 }
 
-
 fn nested_string(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| value.get(*key).and_then(Value::as_str).map(ToOwned::to_owned))
-        .or_else(|| ["result", "params", "thread", "turn"].iter().find_map(|key| value.get(*key).and_then(|nested| nested_string(nested, keys))))
+    keys.iter()
+        .find_map(|key| {
+            value
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            ["result", "params", "thread", "turn"]
+                .iter()
+                .find_map(|key| {
+                    value
+                        .get(*key)
+                        .and_then(|nested| nested_string(nested, keys))
+                })
+        })
 }
 
 fn response_thread_id(value: &Value) -> Option<String> {
@@ -733,7 +2203,10 @@ fn response_thread_id(value: &Value) -> Option<String> {
 }
 
 fn active_turn_id(value: &Value) -> Option<String> {
-    nested_string(value, &["activeTurnId", "active_turn_id", "turnId", "turn_id"])
+    nested_string(
+        value,
+        &["activeTurnId", "active_turn_id", "turnId", "turn_id"],
+    )
 }
 
 fn account_key(canonical_home: &str, identity: &str) -> String {
@@ -745,195 +2218,63 @@ fn account_key(canonical_home: &str, identity: &str) -> String {
 }
 
 #[tauri::command]
-pub(crate) async fn quota_guard_get_state(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> {
+pub(crate) async fn quota_guard_get_state(
+    state: State<'_, AppState>,
+) -> Result<QuotaGuardPublicState, String> {
     let workspace_ids = state.workspaces.lock().await.keys().cloned().collect();
-    state.quota_guard.set_configured_workspaces(workspace_ids).await;
+    state
+        .quota_guard
+        .set_configured_workspaces(workspace_ids)
+        .await;
     Ok(state.quota_guard.public_state().await)
 }
 #[tauri::command]
-pub(crate) async fn quota_guard_apply_action_now(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::ApplyActionNow).await }
+pub(crate) async fn quota_guard_apply_action_now(
+    state: State<'_, AppState>,
+) -> Result<QuotaGuardPublicState, String> {
+    state
+        .quota_guard
+        .command(QuotaGuardCommand::ApplyActionNow)
+        .await
+}
 #[tauri::command]
-pub(crate) async fn quota_guard_keep_waiting(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::KeepWaiting).await }
+pub(crate) async fn quota_guard_verify_now(
+    state: State<'_, AppState>,
+) -> Result<QuotaGuardPublicState, String> {
+    state
+        .quota_guard
+        .command(QuotaGuardCommand::VerifyNow)
+        .await
+}
 #[tauri::command]
-pub(crate) async fn quota_guard_interrupt_now(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::InterruptNow).await }
+pub(crate) async fn quota_guard_rearm(
+    state: State<'_, AppState>,
+) -> Result<QuotaGuardPublicState, String> {
+    state.quota_guard.command(QuotaGuardCommand::Rearm).await
+}
+
 #[tauri::command]
-pub(crate) async fn quota_guard_verify_now(state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> { state.quota_guard.command(QuotaGuardCommand::VerifyNow).await }
+pub(crate) async fn quota_guard_resume(
+    state: State<'_, AppState>,
+) -> Result<QuotaGuardPublicState, String> {
+    state.quota_guard.command(QuotaGuardCommand::Resume).await
+}
 #[tauri::command]
-pub(crate) async fn quota_guard_resolve_intervention(resolution: String, state: State<'_, AppState>) -> Result<QuotaGuardPublicState, String> {
+pub(crate) async fn quota_guard_resolve_intervention(
+    resolution: String,
+    state: State<'_, AppState>,
+) -> Result<QuotaGuardPublicState, String> {
     match resolution.as_str() {
         "disableGuard" => {
             crate::settings::disable_quota_guard_and_open(state.inner()).await?;
             Ok(state.quota_guard.public_state().await)
         }
-        "retryClosed" => state.quota_guard.command(QuotaGuardCommand::RetryClosed).await,
-        _ => Err("unsupported quota guard resolution".into()),
-    }
-}
-
-pub(crate) fn quota_guard_blocked_error(phase: QuotaGuardPhase, verify_at: Option<i64>) -> String {
-    format!("{BLOCKED_PREFIX}|state={}|verifyAt={}", phase_name(phase), verify_at.map(|value| value.to_string()).unwrap_or_default())
-}
-fn phase_name(phase: QuotaGuardPhase) -> &'static str { match phase { QuotaGuardPhase::Disabled => "disabled", QuotaGuardPhase::Monitoring => "monitoring", QuotaGuardPhase::RevalidatingIdentity => "revalidatingIdentity", QuotaGuardPhase::Closing => "closing", QuotaGuardPhase::Draining => "draining", QuotaGuardPhase::AwaitingDrainDecision => "awaitingDrainDecision", QuotaGuardPhase::Interrupting => "interrupting", QuotaGuardPhase::Parked => "parked", QuotaGuardPhase::VerifyingReset => "verifyingReset", QuotaGuardPhase::Ready => "ready", QuotaGuardPhase::InterventionRequired => "interventionRequired" } }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::shared::quota_guard::gate::ProcessGate;
-    use crate::shared::quota_guard::model::{AccountRuntime, QuotaGuardRuntimeState, QuotaWindowKind, RateLimitSnapshot, RateLimitWindow};
-    use crate::shared::quota_guard::persistence::{load_runtime, persist_runtime, LoadRuntime};
-    use crate::types::{QuotaAction, QuotaGuardSettings};
-
-    #[test]
-    fn strict_identity_accepts_only_account_fields_through_known_envelopes() {
-        assert_eq!(
-            strict_account_identity(&serde_json::json!({
-                "id": 42,
-                "result": { "account": { "email": "Member@Example.test", "planType": "pro" } }
-            })),
-            Some("member@example.test".into()),
-        );
-        assert_eq!(
-            strict_account_identity(&serde_json::json!({
-                "id": "member@example.test",
-                "result": { "requestId": "unrelated" }
-            })),
-            None,
-        );
-        assert_eq!(
-            strict_account_identity(&serde_json::json!({
-                "metadata": { "email": "member@example.test" }
-            })),
-            None,
-        );
-    }
-    #[test]
-    fn non_enable_action_change_keeps_breached_notify_only_monitoring_open_until_apply() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let mut account = AccountRuntime::new("account".into(), 1);
-            account.phase = QuotaGuardPhase::Monitoring;
-            account.breached_windows.insert(QuotaWindowKind::Primary);
-            account.snapshot = Some(RateLimitSnapshot {
-                primary: Some(RateLimitWindow { used_percent: 90, window_duration_mins: None, resets_at: Some(60) }),
-                secondary: None, credits: None, plan_type: None, rate_limit_reached_type: None, observed_at: 1,
-            });
-            handle.inner.runtime.lock().await.account = Some(account);
-            let mut bindings = HashMap::new();
-            bindings.insert("workspace".into(), ("epoch".into(), "home".into()));
-            handle.inner.gate.register_closed_epoch("epoch".into(), "workspace".into());
-
-            synchronize_gate_with_runtime(&handle, &bindings).await;
-            assert_eq!(handle.inner.gate.policy(), ProcessPolicy::EnabledOpen);
-            assert!(handle.inner.gate.status(Some("epoch"), "workspace").open);
-
-            let mut settings = QuotaGuardSettings::default();
-            settings.action = QuotaAction::InterruptImmediately;
-            let runtime = handle.runtime().await;
-            let (_, effects) = reduce(runtime, ReducerEvent::ApplyActionNow { now_ms: 2 }, &settings);
-            assert!(effects.iter().any(|effect| matches!(effect, ReducerEffect::SetProcessClosed)));
-            close_enforcement_before_persistence(&handle, &effects);
-            assert_eq!(handle.inner.gate.policy(), ProcessPolicy::EnabledClosed);
-        });
-    }
-
-
-    #[test]
-    fn actor_smoke_persists_closed_gate_before_exact_interrupt() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (mut runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &settings);
-        runtime.account.as_mut().unwrap().local_turn_registry.push(TurnKey { session_epoch: "epoch".into(), workspace_id: "workspace".into(), thread_id: "thread".into(), turn_id: "turn".into() });
-        let baseline = RateLimitSnapshot { primary: Some(RateLimitWindow { used_percent: 89, window_duration_mins: None, resets_at: Some(60) }), secondary: None, credits: None, plan_type: None, rate_limit_reached_type: None, observed_at: 1 };
-        let (runtime, _) = reduce(runtime, ReducerEvent::Snapshot { snapshot: baseline, full_read: true, verification: false, now_ms: 1 }, &settings);
-        let snapshot = RateLimitSnapshot { primary: Some(RateLimitWindow { used_percent: 100, window_duration_mins: None, resets_at: Some(60) }), secondary: None, credits: None, plan_type: None, rate_limit_reached_type: Some("hard".into()), observed_at: 2 };
-        let (runtime, effects) = reduce(runtime, ReducerEvent::Snapshot { snapshot, full_read: true, verification: false, now_ms: 2 }, &settings);
-        assert!(effects.contains(&ReducerEffect::SetProcessClosed));
-        let gate = ProcessGate::default();
-        gate.set_policy(ProcessPolicy::EnabledClosed);
-        let path = std::env::temp_dir().join(format!("quota-guard-actor-smoke-{}.json", std::process::id()));
-        persist_runtime(&path, &runtime).unwrap();
-        assert_eq!(gate.policy(), ProcessPolicy::EnabledClosed);
-        assert!(matches!(load_runtime(&path, 2), LoadRuntime::Valid(saved) if matches!(saved.account.as_ref().map(|account| account.phase), Some(QuotaGuardPhase::Closing))));
-        let generation = runtime.lifecycle_generation;
-        let (_, final_effects) = reduce(runtime, ReducerEvent::FinalizeClosedEpisode { transition_id: generation, now_ms: 1 }, &settings);
-        assert!(final_effects.iter().any(|effect| matches!(effect, ReducerEffect::Interrupt { turn, .. } if turn.workspace_id == "workspace" && turn.thread_id == "thread" && turn.turn_id == "turn")));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn enforcing_close_blocks_post_snapshot_admission_and_defers_finalization() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let (sender, mut receiver) = mpsc::channel(1);
-            *handle.inner.sender.lock().expect("sender lock") = Some(sender);
-            handle.inner.gate.set_policy(ProcessPolicy::EnabledOpen);
-            handle.inner.gate.register_closed_epoch("epoch".into(), "workspace".into());
-            handle.inner.gate.set_epoch_open("epoch", "workspace", true);
-            let admitted_before_close = handle.inner.gate.admit(Some("epoch"), "workspace").expect("pre-close admission");
-
-            close_enforcement_before_persistence(
-                &handle,
-                &[
-                    ReducerEffect::SetProcessClosed,
-                    ReducerEffect::FinalizeClosedEpisode { transition_id: 7 },
-                ],
-            );
-            assert_eq!(handle.inner.gate.policy(), ProcessPolicy::EnabledClosed);
-            assert!(handle.inner.gate.admit(Some("epoch"), "workspace").is_err(), "a post-snapshot request cannot become AllowOnBind");
-
-            enqueue_finalization_after_admissions(&handle, 7).expect("waiter is queued without blocking the actor");
-            assert!(receiver.try_recv().is_err(), "finalization waits outside the actor while a pre-close request persists its fact");
-            drop(admitted_before_close);
-            let event = tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
+        "retryClosed" => {
+            state
+                .quota_guard
+                .command(QuotaGuardCommand::RetryClosed)
                 .await
-                .expect("finalization is queued after admission drains")
-                .expect("actor sender remains open");
-            assert!(matches!(event, ActorEvent::FinalizeClosedEpisode { generation: 7 }));
-        });
-    }
-
-    #[test]
-    fn usage_limit_terminal_orders_full_read_before_closing_finalization() {
-        let mut settings = QuotaGuardSettings::default();
-        settings.action = QuotaAction::InterruptImmediately;
-        let (mut runtime, _) = reduce(QuotaGuardRuntimeState::default(), ReducerEvent::Enable { account_key: "a".into(), now_ms: 1 }, &settings);
-        let turn = TurnKey { session_epoch: "epoch".into(), workspace_id: "workspace".into(), thread_id: "thread".into(), turn_id: "turn".into() };
-        runtime.account.as_mut().expect("account").local_turn_registry.push(turn.clone());
-
-        let (_, effects) = reduce(runtime, ReducerEvent::TurnTerminal {
-            turn,
-            status: "failed".into(),
-            error: Some(serde_json::json!({"error":{"codexErrorInfo":"usageLimitExceeded"}})),
-            now_ms: 2,
-        }, &settings);
-
-        assert!(matches!(
-            effects.as_slice(),
-            [
-                ReducerEffect::SetProcessClosed,
-                ReducerEffect::ReadFullRateLimits,
-                ReducerEffect::FinalizeClosedEpisode { .. },
-            ]
-        ));
-    }
-
-    #[test]
-    fn public_state_serializes_every_frontend_contract_field() {
-        tauri::async_runtime::block_on(async {
-            let handle = QuotaGuardHandle::default();
-            let mut account = AccountRuntime::new("hashed-account".into(), 1);
-            account.snapshot = Some(RateLimitSnapshot {
-                primary: Some(RateLimitWindow { used_percent: 20, window_duration_mins: Some(60), resets_at: Some(100) }),
-                secondary: None, credits: None, plan_type: None,
-                rate_limit_reached_type: None, observed_at: now_ms(),
-            });
-            handle.inner.runtime.lock().await.account = Some(account);
-            let value = serde_json::to_value(public_state_with_bindings(&handle, &HashMap::new()).await).unwrap();
-            for key in ["accountKey", "accountLabel", "phase", "snapshot", "snapshotFresh", "breachedWindows", "affectedTurns", "drainDeadline", "verifyAt", "monitorHealthy", "lastError", "activity", "admissionByWorkspace"] {
-                assert!(value.get(key).is_some(), "missing public state key {key}");
-            }
-            assert_eq!(value["accountKey"], "hashed-account");
-            assert!(value["activity"].as_array().is_some());
-            assert!(value["admissionByWorkspace"].as_object().is_some());
-        });
+        }
+        _ => Err("unsupported quota guard resolution".into()),
     }
 }

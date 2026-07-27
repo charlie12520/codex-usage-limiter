@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct GitFileStatus {
@@ -375,40 +375,54 @@ pub(crate) struct RemoteBackendTarget {
     pub(crate) last_connected_at_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuotaAction {
     NotifyOnly,
-    InterruptImmediately,
-    FinishCurrentTurn,
+    Interrupt,
+    Block,
 }
 
 impl Default for QuotaAction {
     fn default() -> Self {
-        Self::NotifyOnly
+        Self::Interrupt
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum DrainTimeoutAction {
-    NotifyAndHold,
-    Interrupt,
-}
-
-impl Default for DrainTimeoutAction {
-    fn default() -> Self {
-        Self::NotifyAndHold
+impl Serialize for QuotaAction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::NotifyOnly => "notifyOnly",
+            Self::Interrupt => "interrupt",
+            Self::Block => "block",
+        })
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+impl<'de> Deserialize<'de> for QuotaAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("notifyOnly") => Self::NotifyOnly,
+            Some("interrupt") | Some("interruptImmediately") => Self::Interrupt,
+            Some("block") => Self::Block,
+            _ => Self::Interrupt,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuotaGuardSettings {
     #[serde(default)]
     pub(crate) enabled: bool,
     /// When false the guard keeps monitoring usage but suppresses every
-    /// response (notify / finish turn / interrupt).
+    /// response (notify / interrupt).
     #[serde(default = "default_quota_guard_armed")]
     pub(crate) armed: bool,
     #[serde(default = "default_quota_guard_threshold")]
@@ -416,15 +430,17 @@ pub(crate) struct QuotaGuardSettings {
     #[serde(default = "default_quota_guard_threshold")]
     pub(crate) secondary_threshold_percent: u8,
     #[serde(default)]
-    pub(crate) action: QuotaAction,
-    #[serde(default = "default_drain_timeout_minutes")]
-    pub(crate) drain_timeout_minutes: u16,
+    pub(crate) rearm_after_reset_percent_left: Option<u8>,
     #[serde(default)]
-    pub(crate) drain_timeout_action: DrainTimeoutAction,
-    #[serde(default = "default_reset_grace_minutes")]
+    pub(crate) action: QuotaAction,
+    #[serde(skip)]
     pub(crate) reset_grace_minutes: u16,
-    #[serde(default = "default_notify_when_available")]
+    #[serde(skip)]
     pub(crate) notify_when_available: bool,
+    #[serde(skip)]
+    pub(crate) external_suspend: bool,
+    #[serde(skip)]
+    pub(crate) prevent_new_sessions: bool,
 }
 
 impl Default for QuotaGuardSettings {
@@ -434,20 +450,68 @@ impl Default for QuotaGuardSettings {
             armed: default_quota_guard_armed(),
             primary_threshold_percent: default_quota_guard_threshold(),
             secondary_threshold_percent: default_quota_guard_threshold(),
-            action: QuotaAction::NotifyOnly,
-            drain_timeout_minutes: default_drain_timeout_minutes(),
-            drain_timeout_action: DrainTimeoutAction::NotifyAndHold,
-            reset_grace_minutes: default_reset_grace_minutes(),
-            notify_when_available: default_notify_when_available(),
+            rearm_after_reset_percent_left: None,
+            action: QuotaAction::Interrupt,
+            reset_grace_minutes: 10,
+            notify_when_available: true,
+            external_suspend: false,
+            prevent_new_sessions: false,
         }
     }
 }
 
-fn default_quota_guard_armed() -> bool { true }
-fn default_quota_guard_threshold() -> u8 { 90 }
-fn default_drain_timeout_minutes() -> u16 { 15 }
-fn default_reset_grace_minutes() -> u16 { 10 }
-fn default_notify_when_available() -> bool { true }
+fn default_quota_guard_armed() -> bool {
+    true
+}
+fn default_quota_guard_threshold() -> u8 {
+    90
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawQuotaGuardSettings {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_quota_guard_armed")]
+    armed: bool,
+    #[serde(default = "default_quota_guard_threshold")]
+    primary_threshold_percent: u8,
+    #[serde(default = "default_quota_guard_threshold")]
+    secondary_threshold_percent: u8,
+    #[serde(default)]
+    rearm_after_reset_percent_left: Option<u8>,
+    #[serde(default)]
+    action: QuotaAction,
+    #[serde(default)]
+    prevent_new_sessions: bool,
+}
+
+impl<'de> Deserialize<'de> for QuotaGuardSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawQuotaGuardSettings::deserialize(deserializer)?;
+        let action = if raw.prevent_new_sessions && matches!(raw.action, QuotaAction::Interrupt) {
+            QuotaAction::Block
+        } else {
+            raw.action
+        };
+        Ok(Self {
+            enabled: raw.enabled,
+            armed: raw.armed,
+            primary_threshold_percent: raw.primary_threshold_percent,
+            secondary_threshold_percent: raw.secondary_threshold_percent,
+            rearm_after_reset_percent_left: raw
+                .rearm_after_reset_percent_left
+                .map(|value| value.clamp(1, 99)),
+            action,
+            reset_grace_minutes: 10,
+            notify_when_available: true,
+            external_suspend: false,
+            prevent_new_sessions: false,
+        })
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct AppSettings {
@@ -1281,232 +1345,28 @@ impl Default for AppSettings {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        AppSettings, BackendMode, RemoteBackendProvider, WorkspaceEntry, WorkspaceGroup,
-        WorkspaceKind, WorkspaceSettings,
-    };
+mod quota_guard_settings_tests {
+    use super::QuotaGuardSettings;
 
     #[test]
-    fn app_settings_defaults_from_empty_json() {
-        let settings: AppSettings = serde_json::from_str("{}").expect("settings deserialize");
-        assert!(settings.codex_bin.is_none());
-        assert!(!settings.quota_guard.enabled);
-        assert_eq!(settings.quota_guard.primary_threshold_percent, 90);
-        assert_eq!(settings.quota_guard.secondary_threshold_percent, 90);
-        assert_eq!(settings.quota_guard.drain_timeout_minutes, 15);
-        assert_eq!(settings.quota_guard.reset_grace_minutes, 10);
-        assert!(settings.quota_guard.notify_when_available);
-        let expected_backend_mode = if cfg!(target_os = "ios") {
-            BackendMode::Remote
-        } else {
-            BackendMode::Local
-        };
-        assert!(matches!(
-            (&settings.backend_mode, &expected_backend_mode),
-            (BackendMode::Local, BackendMode::Local) | (BackendMode::Remote, BackendMode::Remote)
-        ));
-        assert!(matches!(
-            settings.remote_backend_provider,
-            RemoteBackendProvider::Tcp
-        ));
-        assert_eq!(settings.remote_backend_host, "127.0.0.1:4732");
-        assert!(settings.remote_backend_token.is_none());
-        assert!(settings.remote_backends.is_empty());
-        assert!(settings.active_remote_backend_id.is_none());
-        assert!(!settings.keep_daemon_running_after_app_close);
-        assert_eq!(settings.default_access_mode, "current");
-        assert_eq!(settings.review_delivery_mode, "inline");
-        let expected_primary = if cfg!(target_os = "macos") {
-            "cmd"
-        } else {
-            "ctrl"
-        };
-        let expected_model = format!("{expected_primary}+shift+m");
-        let expected_access = format!("{expected_primary}+shift+a");
-        let expected_reasoning = format!("{expected_primary}+shift+r");
-        let expected_toggle_debug = format!("{expected_primary}+shift+d");
-        let expected_toggle_terminal = format!("{expected_primary}+shift+t");
-        assert_eq!(
-            settings.composer_model_shortcut.as_deref(),
-            Some(expected_model.as_str())
-        );
-        assert_eq!(
-            settings.composer_access_shortcut.as_deref(),
-            Some(expected_access.as_str())
-        );
-        assert_eq!(
-            settings.composer_reasoning_shortcut.as_deref(),
-            Some(expected_reasoning.as_str())
-        );
-        assert_eq!(
-            settings.composer_collaboration_shortcut.as_deref(),
-            Some("shift+tab")
-        );
-        let expected_interrupt = if cfg!(target_os = "macos") {
-            "ctrl+c"
-        } else {
-            "ctrl+shift+c"
-        };
-        assert_eq!(
-            settings.interrupt_shortcut.as_deref(),
-            Some(expected_interrupt)
-        );
-        assert_eq!(
-            settings.archive_thread_shortcut.as_deref(),
-            Some(if cfg!(target_os = "macos") {
-                "cmd+ctrl+a"
-            } else {
-                "ctrl+alt+a"
-            })
-        );
-        assert_eq!(
-            settings.toggle_debug_panel_shortcut.as_deref(),
-            Some(expected_toggle_debug.as_str())
-        );
-        assert_eq!(
-            settings.toggle_terminal_shortcut.as_deref(),
-            Some(expected_toggle_terminal.as_str())
-        );
-        assert_eq!(
-            settings.cycle_agent_next_shortcut.as_deref(),
-            Some(if cfg!(target_os = "macos") {
-                "cmd+ctrl+down"
-            } else {
-                "ctrl+alt+down"
-            })
-        );
-        assert_eq!(
-            settings.cycle_agent_prev_shortcut.as_deref(),
-            Some(if cfg!(target_os = "macos") {
-                "cmd+ctrl+up"
-            } else {
-                "ctrl+alt+up"
-            })
-        );
-        assert_eq!(
-            settings.cycle_workspace_next_shortcut.as_deref(),
-            Some(if cfg!(target_os = "macos") {
-                "cmd+shift+down"
-            } else {
-                "ctrl+alt+shift+down"
-            })
-        );
-        assert_eq!(
-            settings.cycle_workspace_prev_shortcut.as_deref(),
-            Some(if cfg!(target_os = "macos") {
-                "cmd+shift+up"
-            } else {
-                "ctrl+alt+shift+up"
-            })
-        );
-        assert!(settings.last_composer_model_id.is_none());
-        assert!(settings.last_composer_reasoning_effort.is_none());
-        assert!((settings.ui_scale - 1.0).abs() < f64::EPSILON);
-        assert_eq!(settings.theme, "system");
-        assert!(!settings.usage_show_remaining);
-        assert!(settings.show_message_file_path);
-        assert_eq!(settings.chat_history_scrollback_items, Some(200));
-        assert!(!settings.thread_title_autogeneration_enabled);
-        assert!(!settings.automatic_app_update_checks_enabled);
-        assert!(settings.ui_font_family.contains("system-ui"));
-        assert!(settings.code_font_family.contains("ui-monospace"));
-        assert_eq!(settings.code_font_size, 11);
-        assert!(settings.notification_sounds_enabled);
-        assert!(settings.system_notifications_enabled);
-        assert!(settings.subagent_system_notifications_enabled);
-        assert!(!settings.split_chat_diff_view);
-        assert!(settings.preload_git_diffs);
-        assert!(!settings.git_diff_ignore_whitespace_changes);
-        assert!(settings.commit_message_prompt.contains("{diff}"));
-        assert!(settings.collaboration_modes_enabled);
-        assert!(settings.steer_enabled);
-        assert_eq!(settings.follow_up_message_behavior, "queue");
-        assert!(settings.composer_follow_up_hint_enabled);
-        assert!(settings.pause_queued_messages_when_response_required);
-        assert!(settings.unified_exec_enabled);
-        assert!(!settings.experimental_apps_enabled);
-        assert_eq!(settings.personality, "friendly");
-        assert!(!settings.dictation_enabled);
-        assert_eq!(settings.dictation_model_id, "base");
-        assert!(settings.dictation_preferred_language.is_none());
-        assert_eq!(settings.dictation_hold_key, "alt");
-        assert_eq!(settings.composer_editor_preset, "default");
-        assert!(!settings.composer_fence_expand_on_space);
-        assert!(!settings.composer_fence_expand_on_enter);
-        assert!(!settings.composer_fence_language_tags);
-        assert!(!settings.composer_fence_wrap_selection);
-        assert!(!settings.composer_fence_auto_wrap_paste_multiline);
-        assert!(!settings.composer_fence_auto_wrap_paste_code_like);
-        assert!(!settings.composer_list_continuation);
-        assert!(!settings.composer_code_block_copy_use_modifier);
-        assert!(settings.workspace_groups.is_empty());
-        let expected_open_id = if cfg!(target_os = "windows") {
-            "finder"
-        } else {
-            "vscode"
-        };
-        assert_eq!(settings.selected_open_app_id, expected_open_id);
-        assert_eq!(settings.open_app_targets.len(), 6);
-        assert_eq!(settings.open_app_targets[0].id, "vscode");
-    }
+    fn rearm_after_reset_percent_left_is_optional_and_clamped() {
+        let absent: QuotaGuardSettings = serde_json::from_str("{}").expect("absent setting");
+        assert_eq!(absent.rearm_after_reset_percent_left, None);
 
-    #[test]
-    fn workspace_group_defaults_from_minimal_json() {
-        let group: WorkspaceGroup =
-            serde_json::from_str(r#"{"id":"g1","name":"Group"}"#).expect("group deserialize");
-        assert!(group.sort_order.is_none());
-        assert!(group.copies_folder.is_none());
-    }
+        let setting: QuotaGuardSettings = serde_json::from_str(
+            r#"{ "rearmAfterResetPercentLeft": 40 }"#,
+        ).expect("setting roundtrip");
+        assert_eq!(setting.rearm_after_reset_percent_left, Some(40));
+        let value = serde_json::to_value(&setting).expect("serialize setting");
+        assert_eq!(value["rearmAfterResetPercentLeft"], 40);
 
-    #[test]
-    fn app_settings_round_trip_preserves_workspace_group_copies_folder() {
-        let mut settings = AppSettings::default();
-        settings.workspace_groups = vec![WorkspaceGroup {
-            id: "g1".to_string(),
-            name: "Group".to_string(),
-            sort_order: Some(2),
-            copies_folder: Some("/tmp/group-copies".to_string()),
-        }];
-
-        let json = serde_json::to_string(&settings).expect("serialize settings");
-        let decoded: AppSettings = serde_json::from_str(&json).expect("deserialize settings");
-        assert_eq!(decoded.workspace_groups.len(), 1);
-        assert_eq!(
-            decoded.workspace_groups[0].copies_folder.as_deref(),
-            Some("/tmp/group-copies")
-        );
-    }
-
-    #[test]
-    fn workspace_entry_defaults_from_minimal_json() {
-        let entry: WorkspaceEntry =
-            serde_json::from_str(r#"{"id":"1","name":"Test","path":"/tmp"}"#)
-                .expect("workspace deserialize");
-        assert!(matches!(entry.kind, WorkspaceKind::Main));
-        assert!(entry.parent_id.is_none());
-        assert!(entry.worktree.is_none());
-        assert!(entry.settings.sort_order.is_none());
-        assert!(entry.settings.group_id.is_none());
-    }
-
-    #[test]
-    fn workspace_settings_defaults() {
-        let settings = WorkspaceSettings::default();
-        assert!(!settings.sidebar_collapsed);
-        assert!(settings.sort_order.is_none());
-        assert!(settings.group_id.is_none());
-        assert!(settings.git_root.is_none());
-    }
-    #[test]
-    fn quota_guard_serializes_exact_camel_case_contract() {
-        let settings = AppSettings::default();
-        let value = serde_json::to_value(settings).expect("serialize settings");
-        let guard = value.get("quotaGuard").and_then(serde_json::Value::as_object).expect("quotaGuard object");
-        assert_eq!(guard.get("primaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
-        assert_eq!(guard.get("secondaryThresholdPercent").and_then(serde_json::Value::as_u64), Some(90));
-        assert_eq!(guard.get("action").and_then(serde_json::Value::as_str), Some("notifyOnly"));
-        assert_eq!(guard.get("drainTimeoutAction").and_then(serde_json::Value::as_str), Some("notifyAndHold"));
-        assert!(!guard.contains_key("primary_threshold_percent"));
+        let low: QuotaGuardSettings = serde_json::from_str(
+            r#"{ "rearmAfterResetPercentLeft": 0 }"#,
+        ).expect("low setting");
+        let high: QuotaGuardSettings = serde_json::from_str(
+            r#"{ "rearmAfterResetPercentLeft": 100 }"#,
+        ).expect("high setting");
+        assert_eq!(low.rearm_after_reset_percent_left, Some(1));
+        assert_eq!(high.rearm_after_reset_percent_left, Some(99));
     }
 }

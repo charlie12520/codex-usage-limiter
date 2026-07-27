@@ -1,6 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -8,13 +8,14 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
-use crate::types::QuotaGuardSettings;
 use super::gate::{AdmissionReason, ProcessGate, ProcessPolicy};
 use super::model::{QuotaGuardRuntimeState, TurnKey};
+use crate::types::QuotaGuardSettings;
 
 pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 256;
 
-pub(crate) type ControlFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>;
+pub(crate) type ControlFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>;
 
 /// The serialized coordinator persists state before invoking this transport
 /// boundary. Implementations must never hold the session map lock across a
@@ -28,18 +29,66 @@ pub(crate) trait AppServerControl: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SettingsChanged { pub(crate) previous: QuotaGuardSettings, pub(crate) updated: QuotaGuardSettings }
+pub(crate) struct SettingsChanged {
+    pub(crate) previous: QuotaGuardSettings,
+    pub(crate) updated: QuotaGuardSettings,
+}
 #[derive(Debug, Clone)]
 pub(crate) enum QuotaGuardEvent {
-    WorkspaceBound { session_epoch: String, workspace_id: String, canonical_codex_home: String },
-    WorkspaceDisconnected { session_epoch: String, workspace_id: String },
-    RateLimits { session_epoch: String, workspace_id: String, value: Value },
-    TurnStarted { session_epoch: String, workspace_id: String, thread_id: String, turn_id: String },
-    TurnCompleted { session_epoch: String, workspace_id: String, thread_id: String, turn_id: String, status: String, error: Option<Value> },
-    AccountIdentityChanged { session_epoch: String, workspace_id: String, reason: String },
-    PendingLocalStart { request_id: u64, session_epoch: String, workspace_id: String, request_thread_id: Option<String>, expected_thread_id: Option<String>, request_kind: String },
-    StartResponse { request_id: u64, session_epoch: String, workspace_id: String, method: String, value: Value },
-    StartFailed { request_id: u64, session_epoch: String, workspace_id: String, reason: String },
+    WorkspaceBound {
+        session_epoch: String,
+        workspace_id: String,
+        canonical_codex_home: String,
+    },
+    WorkspaceDisconnected {
+        session_epoch: String,
+        workspace_id: String,
+    },
+    RateLimits {
+        session_epoch: String,
+        workspace_id: String,
+        value: Value,
+    },
+    TurnStarted {
+        session_epoch: String,
+        workspace_id: String,
+        thread_id: String,
+        turn_id: String,
+    },
+    TurnCompleted {
+        session_epoch: String,
+        workspace_id: String,
+        thread_id: String,
+        turn_id: String,
+        status: String,
+        error: Option<Value>,
+    },
+    AccountIdentityChanged {
+        session_epoch: String,
+        workspace_id: String,
+        reason: String,
+    },
+    PendingLocalStart {
+        request_id: u64,
+        session_epoch: String,
+        workspace_id: String,
+        request_thread_id: Option<String>,
+        expected_thread_id: Option<String>,
+        request_kind: String,
+    },
+    StartResponse {
+        request_id: u64,
+        session_epoch: String,
+        workspace_id: String,
+        method: String,
+        value: Value,
+    },
+    StartFailed {
+        request_id: u64,
+        session_epoch: String,
+        workspace_id: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
@@ -50,19 +99,47 @@ pub(crate) enum ActorEvent {
     /// on the non-blocking `Observed` path.
     ReliableObserved(QuotaGuardEvent, oneshot::Sender<Result<(), String>>),
     SettingsChanged(SettingsChanged, oneshot::Sender<Result<(), String>>),
-    Command(QuotaGuardCommand, oneshot::Sender<Result<QuotaGuardPublicState, String>>),
+    Command(
+        QuotaGuardCommand,
+        oneshot::Sender<Result<QuotaGuardPublicState, String>>,
+    ),
     AppStartupRehydrate,
-    FinalizeClosedEpisode { generation: u64 },
-    DrainDeadline { generation: u64, deadline: i64 },
-    Verify { generation: u64, verify_at: i64 },
-    InterruptDeadline { turn: super::model::TurnKey, generation: u64, operation_id: u64, attempt: u8, acknowledgement: bool },
-    StartExpiry { request_id: u64, generation: u64 },
-    ProvisionalExpiry { turn: super::model::TurnKey, generation: u64, terminal: bool },
-    HealthyRevalidate { generation: u64, due_at: i64 },
+    ThresholdSettled {
+        settles_at: i64,
+    },
+    FinalizeClosedEpisode {
+        generation: u64,
+    },
+    InterruptDeadline {
+        turn: super::model::TurnKey,
+        generation: u64,
+        operation_id: u64,
+        attempt: u8,
+        acknowledgement: bool,
+    },
+    StartExpiry {
+        request_id: u64,
+        generation: u64,
+    },
+    ProvisionalExpiry {
+        turn: super::model::TurnKey,
+        generation: u64,
+        terminal: bool,
+    },
+    HealthyRevalidate {
+        generation: u64,
+        due_at: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum QuotaGuardCommand { ApplyActionNow, KeepWaiting, InterruptNow, VerifyNow, RetryClosed }
+pub(crate) enum QuotaGuardCommand {
+    ApplyActionNow,
+    VerifyNow,
+    Rearm,
+    RetryClosed,
+    Resume,
+}
 
 pub(crate) struct QuotaGuardInner {
     pub(crate) runtime: Arc<Mutex<QuotaGuardRuntimeState>>,
@@ -76,9 +153,13 @@ pub(crate) struct QuotaGuardInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct QuotaGuardHandle { pub(crate) inner: Arc<QuotaGuardInner> }
+pub(crate) struct QuotaGuardHandle {
+    pub(crate) inner: Arc<QuotaGuardInner>,
+}
 #[derive(Clone)]
-pub(crate) struct QuotaGuardEventSink { inner: Arc<QuotaGuardInner> }
+pub(crate) struct QuotaGuardEventSink {
+    inner: Arc<QuotaGuardInner>,
+}
 impl Default for QuotaGuardHandle {
     fn default() -> Self {
         Self {
@@ -97,23 +178,39 @@ impl Default for QuotaGuardHandle {
 }
 
 impl QuotaGuardHandle {
-    pub(crate) fn gate(&self) -> ProcessGate { self.inner.gate.clone() }
-    pub(crate) fn event_sink(&self) -> QuotaGuardEventSink { QuotaGuardEventSink { inner: Arc::clone(&self.inner) } }
-    pub(crate) async fn runtime(&self) -> QuotaGuardRuntimeState { self.inner.runtime.lock().await.clone() }
+    pub(crate) fn gate(&self) -> ProcessGate {
+        self.inner.gate.clone()
+    }
+    pub(crate) fn event_sink(&self) -> QuotaGuardEventSink {
+        QuotaGuardEventSink {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+    pub(crate) async fn runtime(&self) -> QuotaGuardRuntimeState {
+        self.inner.runtime.lock().await.clone()
+    }
     pub(crate) async fn set_configured_workspaces(&self, workspace_ids: BTreeSet<String>) {
         *self.inner.configured_workspaces.lock().await = workspace_ids;
     }
 }
 
 impl QuotaGuardEventSink {
-    pub(crate) fn gate(&self) -> ProcessGate { self.inner.gate.clone() }
+    pub(crate) fn gate(&self) -> ProcessGate {
+        self.inner.gate.clone()
+    }
 
     /// This is deliberately non-blocking: the stdout reader must never wait
     /// behind durable policy work.  Loss is enforcement-significant, so both a
     /// full and a closed channel synchronously close admission before waking
     /// the actor's overflow reconciliation path.
     pub(crate) fn observe(&self, event: QuotaGuardEvent) -> Result<(), ()> {
-        let Some(sender) = self.inner.sender.lock().expect("quota guard sender lock poisoned").clone() else {
+        let Some(sender) = self
+            .inner
+            .sender
+            .lock()
+            .expect("quota guard sender lock poisoned")
+            .clone()
+        else {
             self.fail_closed();
             return Err(());
         };
@@ -146,18 +243,30 @@ impl QuotaGuardEventSink {
     }
 
     async fn record_reliably(&self, event: QuotaGuardEvent) -> Result<(), String> {
-        let Some(sender) = self.inner.sender.lock().expect("quota guard sender lock poisoned").clone() else {
+        let Some(sender) = self
+            .inner
+            .sender
+            .lock()
+            .expect("quota guard sender lock poisoned")
+            .clone()
+        else {
             self.fail_closed();
             return Err("quota guard actor is unavailable".into());
         };
         let (reply, received) = oneshot::channel();
-        if sender.send(ActorEvent::ReliableObserved(event, reply)).await.is_err() {
+        if sender
+            .send(ActorEvent::ReliableObserved(event, reply))
+            .await
+            .is_err()
+        {
             self.fail_closed();
             return Err("quota guard actor is unavailable".into());
         }
         match received.await {
             Ok(result) => {
-                if result.is_err() { self.fail_closed(); }
+                if result.is_err() {
+                    self.fail_closed();
+                }
                 result
             }
             Err(_) => {
@@ -167,10 +276,18 @@ impl QuotaGuardEventSink {
         }
     }
 
-    pub(crate) fn workspace_bound(&self, session_epoch: String, workspace_id: String, canonical_codex_home: String) -> Result<(), ()> {
-        self.observe(QuotaGuardEvent::WorkspaceBound { session_epoch, workspace_id, canonical_codex_home })
+    pub(crate) fn workspace_bound(
+        &self,
+        session_epoch: String,
+        workspace_id: String,
+        canonical_codex_home: String,
+    ) -> Result<(), ()> {
+        self.observe(QuotaGuardEvent::WorkspaceBound {
+            session_epoch,
+            workspace_id,
+            canonical_codex_home,
+        })
     }
-
 
     fn fail_closed(&self) {
         self.inner.gate.close();
@@ -185,8 +302,14 @@ pub(crate) enum ControlCall {
     ReadRateLimits(String),
     ReadIdentity(String),
     Interrupt(TurnKey),
-    ReadThread { workspace_id: String, thread_id: String },
-    ResumeThread { workspace_id: String, thread_id: String },
+    ReadThread {
+        workspace_id: String,
+        thread_id: String,
+    },
+    ResumeThread {
+        workspace_id: String,
+        thread_id: String,
+    },
 }
 
 /// Deterministic reducer/effect harness. Tests inject deadlines explicitly,
@@ -213,8 +336,19 @@ impl QuotaGuardHarness {
             bindings: BTreeMap::new(),
         }
     }
-    pub(crate) fn from_persisted(settings: QuotaGuardSettings, runtime: QuotaGuardRuntimeState, now_ms: i64) -> Self {
-        Self { runtime, settings, now_ms, effects: Vec::new(), configured_workspaces: BTreeSet::new(), bindings: BTreeMap::new() }
+    pub(crate) fn from_persisted(
+        settings: QuotaGuardSettings,
+        runtime: QuotaGuardRuntimeState,
+        now_ms: i64,
+    ) -> Self {
+        Self {
+            runtime,
+            settings,
+            now_ms,
+            effects: Vec::new(),
+            configured_workspaces: BTreeSet::new(),
+            bindings: BTreeMap::new(),
+        }
     }
     pub(crate) fn dispatch(&mut self, event: super::reducer::ReducerEvent) {
         let (next, effects) = super::reducer::reduce(self.runtime.clone(), event, &self.settings);
@@ -242,13 +376,36 @@ impl QuotaGuardHarness {
         self.bindings.remove(workspace_id);
     }
     pub(crate) fn public_admission(&self) -> BTreeMap<String, AdmissionProjection> {
-        self.configured_workspaces.iter().map(|workspace_id| {
-            let epoch = self.bindings.get(workspace_id).cloned();
-            let phase = self.runtime.account.as_ref().map(|account| account.phase);
-            let open = epoch.is_some() && matches!(phase, None | Some(super::model::QuotaGuardPhase::Disabled | super::model::QuotaGuardPhase::Monitoring | super::model::QuotaGuardPhase::Ready));
-            let reason = if epoch.is_none() { "workspaceUnbound" } else if open { "open" } else { "processClosed" };
-            (workspace_id.clone(), AdmissionProjection { session_epoch: epoch, open, reason: reason.to_string() })
-        }).collect()
+        self.configured_workspaces
+            .iter()
+            .map(|workspace_id| {
+                let epoch = self.bindings.get(workspace_id).cloned();
+                let phase = self.runtime.account.as_ref().map(|account| account.phase);
+                let open = epoch.is_some()
+                    && matches!(
+                        phase,
+                        None | Some(
+                            super::model::QuotaGuardPhase::Disabled
+                                | super::model::QuotaGuardPhase::Monitoring
+                        )
+                    );
+                let reason = if epoch.is_none() {
+                    "workspaceUnbound"
+                } else if open {
+                    "open"
+                } else {
+                    "processClosed"
+                };
+                (
+                    workspace_id.clone(),
+                    AdmissionProjection {
+                        session_epoch: epoch,
+                        open,
+                        reason: reason.to_string(),
+                    },
+                )
+            })
+            .collect()
     }
     pub(crate) fn overflow(&mut self) {
         if let Some(account) = self.runtime.account.as_mut() {
@@ -266,33 +423,108 @@ impl QuotaGuardHarness {
         let effects = self.take_effects();
         for effect in effects {
             match effect {
-                super::reducer::ReducerEffect::Interrupt { turn, generation, operation_id, attempt } => {
-                    match control.interrupt_turn(turn.clone()).await {
-                        Ok(_) => self.dispatch(super::reducer::ReducerEvent::InterruptAcknowledged { turn, generation, operation_id, attempt, now_ms: self.now_ms }),
-                        Err(_) => self.dispatch(super::reducer::ReducerEvent::InterruptRequestFailed { turn, generation, operation_id, attempt, now_ms: self.now_ms }),
+                super::reducer::ReducerEffect::Interrupt {
+                    turn,
+                    generation,
+                    operation_id,
+                    attempt,
+                } => match control.interrupt_turn(turn.clone()).await {
+                    Ok(_) => self.dispatch(super::reducer::ReducerEvent::InterruptAcknowledged {
+                        turn,
+                        generation,
+                        operation_id,
+                        attempt,
+                        now_ms: self.now_ms,
+                    }),
+                    Err(_) => self.dispatch(super::reducer::ReducerEvent::InterruptRequestFailed {
+                        turn,
+                        generation,
+                        operation_id,
+                        attempt,
+                        now_ms: self.now_ms,
+                    }),
+                },
+                super::reducer::ReducerEffect::ReconcileThread {
+                    turn,
+                    generation,
+                    operation_id,
+                    attempt,
+                } => {
+                    match control
+                        .read_thread(turn.workspace_id.clone(), turn.thread_id.clone())
+                        .await
+                    {
+                        Ok(value) => {
+                            self.dispatch(super::reducer::ReducerEvent::InterruptReconciled {
+                                active_turn_id: fake_active_turn_id(&value),
+                                turn,
+                                generation,
+                                operation_id,
+                                attempt,
+                                now_ms: self.now_ms,
+                            })
+                        }
+                        Err(reason) => {
+                            self.dispatch(super::reducer::ReducerEvent::InterruptReconcileFailed {
+                                turn,
+                                generation,
+                                operation_id,
+                                attempt,
+                                reason,
+                                now_ms: self.now_ms,
+                            })
+                        }
                     }
                 }
-                super::reducer::ReducerEffect::ReconcileThread { turn, generation, operation_id, attempt } => {
-                    match control.read_thread(turn.workspace_id.clone(), turn.thread_id.clone()).await {
-                        Ok(value) => self.dispatch(super::reducer::ReducerEvent::InterruptReconciled {
-                            active_turn_id: fake_active_turn_id(&value), turn, generation, operation_id, attempt, now_ms: self.now_ms,
-                        }),
-                        Err(reason) => self.dispatch(super::reducer::ReducerEvent::InterruptReconcileFailed {
-                            turn, generation, operation_id, attempt, reason, now_ms: self.now_ms,
-                        }),
+                super::reducer::ReducerEffect::VerifyNow => {
+                    let Some(workspace_id) = self
+                        .runtime
+                        .account
+                        .as_ref()
+                        .and_then(|account| account.associated_workspace_ids.first().cloned())
+                    else {
+                        continue;
+                    };
+                    if let Ok(value) = control.read_rate_limits(workspace_id).await {
+                        let prior = self
+                            .runtime
+                            .account
+                            .as_ref()
+                            .and_then(|account| account.snapshot.as_ref());
+                        if let Ok(snapshot) = crate::shared::quota_guard::parser::parse_rate_limits(
+                            &value,
+                            prior,
+                            self.now_ms,
+                        ) {
+                            self.dispatch(super::reducer::ReducerEvent::Snapshot {
+                                snapshot,
+                                full_read: true,
+                                verification: true,
+                                now_ms: self.now_ms,
+                            });
+                        }
                     }
                 }
                 other => self.effects.push(other),
             }
         }
     }
-
 }
 #[cfg(test)]
 fn fake_active_turn_id(value: &Value) -> Option<String> {
-    ["activeTurnId", "active_turn_id", "turnId", "turn_id"].iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str).map(ToOwned::to_owned))
-        .or_else(|| ["result", "params", "turn"].iter().find_map(|key| value.get(*key).and_then(fake_active_turn_id)))
+    ["activeTurnId", "active_turn_id", "turnId", "turn_id"]
+        .iter()
+        .find_map(|key| {
+            value
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            ["result", "params", "turn"]
+                .iter()
+                .find_map(|key| value.get(*key).and_then(fake_active_turn_id))
+        })
 }
 
 #[cfg(test)]
@@ -305,16 +537,30 @@ pub(crate) struct FakeAppServerControl {
 #[cfg(test)]
 impl FakeAppServerControl {
     pub(crate) fn queue(&self, operation: impl Into<String>, reply: Result<Value, String>) {
-        self.replies.lock().expect("fake control lock poisoned").entry(operation.into()).or_default().push_back(reply);
+        self.replies
+            .lock()
+            .expect("fake control lock poisoned")
+            .entry(operation.into())
+            .or_default()
+            .push_back(reply);
     }
     pub(crate) fn calls(&self) -> Vec<ControlCall> {
-        self.calls.lock().expect("fake control lock poisoned").clone()
+        self.calls
+            .lock()
+            .expect("fake control lock poisoned")
+            .clone()
     }
     fn next(&self, operation: String, call: ControlCall) -> ControlFuture<'_> {
-        self.calls.lock().expect("fake control lock poisoned").push(call);
+        self.calls
+            .lock()
+            .expect("fake control lock poisoned")
+            .push(call);
         Box::pin(async move {
-            self.replies.lock().expect("fake control lock poisoned")
-                .get_mut(&operation).and_then(std::collections::VecDeque::pop_front)
+            self.replies
+                .lock()
+                .expect("fake control lock poisoned")
+                .get_mut(&operation)
+                .and_then(std::collections::VecDeque::pop_front)
                 .unwrap_or_else(|| Err(format!("no fake reply queued for {operation}")))
         })
     }
@@ -323,19 +569,40 @@ impl FakeAppServerControl {
 #[cfg(test)]
 impl AppServerControl for FakeAppServerControl {
     fn read_rate_limits(&self, workspace_id: String) -> ControlFuture<'_> {
-        self.next(format!("rate:{workspace_id}"), ControlCall::ReadRateLimits(workspace_id))
+        self.next(
+            format!("rate:{workspace_id}"),
+            ControlCall::ReadRateLimits(workspace_id),
+        )
     }
     fn read_identity(&self, workspace_id: String) -> ControlFuture<'_> {
-        self.next(format!("identity:{workspace_id}"), ControlCall::ReadIdentity(workspace_id))
+        self.next(
+            format!("identity:{workspace_id}"),
+            ControlCall::ReadIdentity(workspace_id),
+        )
     }
     fn interrupt_turn(&self, turn: TurnKey) -> ControlFuture<'_> {
-        self.next(format!("interrupt:{}", turn.stable_id()), ControlCall::Interrupt(turn))
+        self.next(
+            format!("interrupt:{}", turn.stable_id()),
+            ControlCall::Interrupt(turn),
+        )
     }
     fn read_thread(&self, workspace_id: String, thread_id: String) -> ControlFuture<'_> {
-        self.next(format!("thread:{workspace_id}:{thread_id}"), ControlCall::ReadThread { workspace_id, thread_id })
+        self.next(
+            format!("thread:{workspace_id}:{thread_id}"),
+            ControlCall::ReadThread {
+                workspace_id,
+                thread_id,
+            },
+        )
     }
     fn resume_thread(&self, workspace_id: String, thread_id: String) -> ControlFuture<'_> {
-        self.next(format!("resume:{workspace_id}:{thread_id}"), ControlCall::ResumeThread { workspace_id, thread_id })
+        self.next(
+            format!("resume:{workspace_id}:{thread_id}"),
+            ControlCall::ResumeThread {
+                workspace_id,
+                thread_id,
+            },
+        )
     }
 }
 
@@ -349,10 +616,9 @@ pub(crate) struct QuotaGuardPublicState {
     pub(crate) snapshot_fresh: bool,
     pub(crate) breached_windows: Vec<super::model::QuotaWindowKind>,
     pub(crate) affected_turns: Vec<QuotaGuardPublicTurn>,
-    pub(crate) drain_deadline: Option<i64>,
-    pub(crate) verify_at: Option<i64>,
     pub(crate) monitor_healthy: bool,
     pub(crate) last_error: Option<String>,
+    pub(crate) suspended_external_engines: Vec<QuotaGuardPublicSuspendedEngine>,
     pub(crate) activity: Vec<QuotaGuardPublicActivityEntry>,
     pub(crate) admission_by_workspace: BTreeMap<String, AdmissionProjection>,
 }
@@ -363,6 +629,14 @@ pub(crate) struct QuotaGuardPublicTurn {
     pub(crate) workspace_id: String,
     pub(crate) thread_id: String,
     pub(crate) turn_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QuotaGuardPublicSuspendedEngine {
+    pub(crate) pid: u32,
+    pub(crate) image_path: String,
+    pub(crate) suspended_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,5 +661,19 @@ pub(crate) struct AdmissionProjection {
     pub(crate) reason: String,
 }
 
-pub(crate) fn policy_name(policy: ProcessPolicy) -> &'static str { match policy { ProcessPolicy::DisabledOpen => "disabledOpen", ProcessPolicy::EnabledClosed => "enabledClosed", ProcessPolicy::EnabledOpen => "enabledOpen" } }
-pub(crate) fn reason_name(reason: AdmissionReason) -> &'static str { match reason { AdmissionReason::Open => "open", AdmissionReason::GuardDisabled => "guardDisabled", AdmissionReason::ProcessClosed => "processClosed", AdmissionReason::EpochUnverified => "epochUnverified", AdmissionReason::WorkspaceUnbound => "workspaceUnbound" } }
+pub(crate) fn policy_name(policy: ProcessPolicy) -> &'static str {
+    match policy {
+        ProcessPolicy::DisabledOpen => "disabledOpen",
+        ProcessPolicy::EnabledClosed => "enabledClosed",
+        ProcessPolicy::EnabledOpen => "enabledOpen",
+    }
+}
+pub(crate) fn reason_name(reason: AdmissionReason) -> &'static str {
+    match reason {
+        AdmissionReason::Open => "open",
+        AdmissionReason::GuardDisabled => "guardDisabled",
+        AdmissionReason::ProcessClosed => "processClosed",
+        AdmissionReason::EpochUnverified => "epochUnverified",
+        AdmissionReason::WorkspaceUnbound => "workspaceUnbound",
+    }
+}

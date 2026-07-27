@@ -3,14 +3,7 @@ import type { RateLimitSnapshot } from "@/types";
 export type QuotaGuardPhase =
   | "disabled"
   | "monitoring"
-  | "revalidatingIdentity"
-  | "closing"
-  | "draining"
-  | "awaitingDrainDecision"
-  | "interrupting"
-  | "parked"
-  | "verifyingReset"
-  | "ready"
+  | "tripped"
   | "interventionRequired";
 
 export type QuotaGuardWindowKind = "primary" | "secondary" | "hardLimit";
@@ -22,7 +15,10 @@ export type QuotaGuardActivityKind =
   | "interruptRequested"
   | "interruptAcknowledged"
   | "interruptCompleted"
-  | "monitorError";
+  | "monitorError"
+  | "externalEngineSuspended"
+  | "externalEngineResumed"
+  | "externalEngineSkipped";
 
 export type QuotaGuardActivityEntry = {
   id: string | null;
@@ -40,6 +36,12 @@ export type QuotaGuardTurn = {
   workspaceId: string;
   threadId: string;
   turnId: string;
+};
+
+export type QuotaGuardSuspendedEngine = {
+  pid: number;
+  imagePath: string;
+  suspendedAt: number;
 };
 
 export type AdmissionReason =
@@ -63,10 +65,9 @@ export type QuotaGuardPublicState = {
   snapshotFresh: boolean;
   breachedWindows: QuotaGuardWindowKind[];
   affectedTurns: QuotaGuardTurn[];
-  drainDeadline: number | null;
-  verifyAt: number | null;
   monitorHealthy: boolean;
   lastError: string | null;
+  suspendedExternalEngines?: QuotaGuardSuspendedEngine[];
   activity: QuotaGuardActivityEntry[];
   admissionByWorkspace: Record<string, QuotaGuardAdmission>;
 };

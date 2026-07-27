@@ -53,6 +53,7 @@ import {
   generateAgentDescription,
   writeAgentConfigToml,
   writeAgentMd,
+  quotaGuardRearm,
   quotaGuardResolveIntervention,
 } from "./tauri";
 
@@ -506,6 +507,15 @@ describe("tauri invoke wrappers", () => {
     expect(invokeMock).toHaveBeenCalledWith("quota_guard_resolve_intervention", {
       resolution: "retryClosed",
     });
+  });
+
+  it("rearms an active quota episode", async () => {
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockResolvedValue(undefined);
+
+    await quotaGuardRearm();
+
+    expect(invokeMock).toHaveBeenCalledWith("quota_guard_rearm");
   });
 
   it("reads agent.md for a workspace", async () => {

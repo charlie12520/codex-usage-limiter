@@ -1,23 +1,25 @@
 # Codex Usage Limiter
 
-Codex Usage Limiter is an unofficial Windows desktop utility that watches the signed-in Codex account's rate limits and applies a chosen response when your remaining quota drops below a floor you set.
+Codex Usage Limiter is an unofficial Windows desktop utility that watches the signed-in Codex account's rate limits and applies a chosen response when your remaining quota reaches or drops below a floor you set.
 
 It is derived from [Dimillian/CodexMonitor](https://github.com/Dimillian/CodexMonitor). The upstream copyright and MIT license are retained. This project is not affiliated with or endorsed by OpenAI.
 
-![Compact mode](docs/screenshots/limiter-compact.png)
+[Product page](https://charlie12520.github.io/codex-usage-limiter/) · [Latest release](../../releases/latest)
+
+![Compact mode](docs/screenshots/limiter-monitor-light.png)
 
 ## What it does
 
 - Polls the primary and secondary rate-limit windows from the local Codex app-server (immediately on launch, then every 10 seconds) and shows the window closer to running out as one **% remaining** figure with its reset countdown.
-- Lets you drag a grabber along the usage bar to set the floor — the bar turns red once remaining quota falls below it.
+- Lets you drag a grabber along the usage bar to set the floor — the bar turns red once remaining quota reaches or falls below it.
 - Fires one of three responses when remaining quota crosses the floor:
   - **Notify only** — show a native Windows notification and keep working.
-  - **Finish current turn** — block new inference, let turns active at the crossing finish, then pause.
-  - **Interrupt immediately** — block new inference and interrupt owned active turns.
+  - **Interrupt** — interrupt owned active turns and suspend matching local Codex engines for the episode.
+  - **Block** — close inference admission and keep matching local Codex engines suspended until reset verification.
 - The green titlebar switch arms/disarms responses. Disarmed, the app keeps tracking and displaying usage but takes no action.
 - Persists quota state, owned-turn identities, deadlines, and reset verification across restarts, and revalidates account identity before reopening inference.
 
-The limiter controls only Codex sessions launched through this application. It does not control separate terminals or other Codex clients — but it tracks and displays account-level usage regardless of where you spend it.
+The limiter controls Codex sessions launched through this application. When **Also suspend external Codex engines** is enabled, an enforcing episode also freezes matching local, current-user Codex desktop-app and CLI engines until reset verification or resolve. This can make those apps look hung. It cannot reach Codex in WSL, containers, remote/SSH machines, or the web, though account-level usage remains visible.
 
 ## Window modes
 
@@ -29,7 +31,7 @@ Pick a size under Settings → Window size. Settings also has a **Keep in foregr
 
 Compact keeps every control on the surface. Mini is a glance card. Pill is a titlebar-less sliver you can park in a screen corner — drag anywhere on it to move it.
 
-![Settings](docs/screenshots/limiter-settings.png)
+![Settings](docs/screenshots/limiter-settings-light.png)
 
 ## Install
 
@@ -67,6 +69,8 @@ For development with hot reload:
 ```bash
 npm run tauri:dev:win
 ```
+
+Set `CODEX_LIMITER_BOOT_SCREEN=settings` (or `monitor`) before launch to open that screen for a single development session; invalid or unset values use the default and are never persisted.
 
 Verification:
 

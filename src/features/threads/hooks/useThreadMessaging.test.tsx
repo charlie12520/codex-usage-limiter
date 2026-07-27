@@ -786,13 +786,13 @@ describe("useThreadMessaging telemetry", () => {
   it("reports quota-only outcomes through real queued review, compact, fork, and new adapters", async () => {
     const pushThreadErrorMessage = vi.fn();
     vi.mocked(compactThreadService).mockRejectedValueOnce(
-      new Error("QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1"),
+      new Error("QUOTA_GUARD_BLOCKED|state=tripped"),
     );
     vi.mocked(startReviewService).mockResolvedValueOnce({
-      error: { message: "QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1" },
+      error: { message: "QUOTA_GUARD_BLOCKED|state=tripped" },
     } as never);
     vi.mocked(sendUserMessageService).mockRejectedValue(
-      new Error("QUOTA_GUARD_BLOCKED|state=parked|verifyAt=1"),
+      new Error("QUOTA_GUARD_BLOCKED|state=tripped"),
     );
     const { result } = renderHook(() =>
       useThreadMessaging({

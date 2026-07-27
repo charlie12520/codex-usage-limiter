@@ -270,9 +270,6 @@ type BuildAppModalsPropsArgs = {
   quotaGuardQueueResumeRequired: boolean;
   onCloseQuotaGuardPanel: () => void;
   onQuotaGuardApplyActionNow: AppModalsProps["onQuotaGuardApplyActionNow"];
-  onQuotaGuardKeepWaiting: AppModalsProps["onQuotaGuardKeepWaiting"];
-  onQuotaGuardInterruptNow: AppModalsProps["onQuotaGuardInterruptNow"];
-  onQuotaGuardVerifyNow: AppModalsProps["onQuotaGuardVerifyNow"];
   onQuotaGuardResolve: AppModalsProps["onQuotaGuardResolve"];
   onQuotaGuardResumeQueuedSends: () => void;
 };
@@ -327,9 +324,6 @@ function buildAppModalsProps({
   quotaGuardQueueResumeRequired,
   onCloseQuotaGuardPanel,
   onQuotaGuardApplyActionNow,
-  onQuotaGuardKeepWaiting,
-  onQuotaGuardInterruptNow,
-  onQuotaGuardVerifyNow,
   onQuotaGuardResolve,
   onQuotaGuardResumeQueuedSends,
 }: BuildAppModalsPropsArgs): AppModalsProps {
@@ -383,9 +377,6 @@ function buildAppModalsProps({
     quotaGuardQueueResumeRequired,
     onCloseQuotaGuardPanel,
     onQuotaGuardApplyActionNow,
-    onQuotaGuardKeepWaiting,
-    onQuotaGuardInterruptNow,
-    onQuotaGuardVerifyNow,
     onQuotaGuardResolve,
     onQuotaGuardResumeQueuedSends,
   };
@@ -570,9 +561,6 @@ export function useMainAppModals({
         quotaGuardQueueResumeRequired: quotaGuard.queueResumeRequired,
         onCloseQuotaGuardPanel: closeQuotaGuardPanel,
         onQuotaGuardApplyActionNow: quotaGuard.applyActionNow,
-        onQuotaGuardKeepWaiting: quotaGuard.keepWaiting,
-        onQuotaGuardInterruptNow: quotaGuard.interruptNow,
-        onQuotaGuardVerifyNow: quotaGuard.verifyNow,
         onQuotaGuardResolve: quotaGuard.resolveIntervention,
         onQuotaGuardResumeQueuedSends: resumeQuotaGuardQueue,
       }),
@@ -609,12 +597,9 @@ export function useMainAppModals({
       settingsSection,
       settingsViewComponent,
       quotaGuard.applyActionNow,
-      quotaGuard.interruptNow,
-      quotaGuard.keepWaiting,
       quotaGuard.queueResumeRequired,
       quotaGuard.resolveIntervention,
       quotaGuard.state,
-      quotaGuard.verifyNow,
       quotaGuardPanelOpen,
       resumeQuotaGuardQueue,
       settingsViewProps,

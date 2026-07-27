@@ -869,6 +869,10 @@ export async function getAppSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("get_app_settings");
 }
 
+export async function getLimiterBootScreen(): Promise<"monitor" | "settings" | null> {
+  return invoke<"monitor" | "settings" | null>("get_limiter_boot_screen");
+}
+
 export async function isMobileRuntime(): Promise<boolean> {
   return invoke<boolean>("is_mobile_runtime");
 }
@@ -879,6 +883,10 @@ export async function updateAppSettings(settings: AppSettings): Promise<AppSetti
 
 export async function setTrayUsageTooltip(tooltip: string): Promise<void> {
   return invoke("set_tray_usage_tooltip", { tooltip });
+}
+
+export async function setTrayTheme(theme: "light" | "dark"): Promise<void> {
+  return invoke("set_tray_theme", { theme });
 }
 
 export async function getAutostart(): Promise<boolean> {
@@ -897,16 +905,16 @@ export async function quotaGuardApplyActionNow(): Promise<QuotaGuardPublicState>
   return invoke<QuotaGuardPublicState>("quota_guard_apply_action_now");
 }
 
-export async function quotaGuardKeepWaiting(): Promise<QuotaGuardPublicState> {
-  return invoke<QuotaGuardPublicState>("quota_guard_keep_waiting");
-}
-
-export async function quotaGuardInterruptNow(): Promise<QuotaGuardPublicState> {
-  return invoke<QuotaGuardPublicState>("quota_guard_interrupt_now");
-}
-
 export async function quotaGuardVerifyNow(): Promise<QuotaGuardPublicState> {
   return invoke<QuotaGuardPublicState>("quota_guard_verify_now");
+}
+
+export async function quotaGuardRearm(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_rearm");
+}
+
+export async function quotaGuardResume(): Promise<QuotaGuardPublicState> {
+  return invoke<QuotaGuardPublicState>("quota_guard_resume");
 }
 
 export async function quotaGuardResolveIntervention(

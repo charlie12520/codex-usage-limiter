@@ -819,7 +819,7 @@ fn quota_guard_blocked_error(status: crate::shared::quota_guard::gate::Admission
         AdmissionReason::EpochUnverified => "epochUnverified",
         AdmissionReason::WorkspaceUnbound => "workspaceUnbound",
     };
-    format!("QUOTA_GUARD_BLOCKED|state={state}|verifyAt=")
+    format!("QUOTA_GUARD_BLOCKED|state={state}")
 }
 
 pub(crate) fn build_codex_path_env(codex_bin: Option<&str>) -> Option<String> {

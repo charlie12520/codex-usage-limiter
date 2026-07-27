@@ -6,7 +6,6 @@ import {
   type QuotaGuardResolution,
 } from "../quotaGuardTypes";
 import { formatQuotaGuardTimestamp, quotaGuardControls, quotaGuardPhaseLabel } from "../quotaGuardViewModel";
-import { QuotaGuardDrainDecision } from "./QuotaGuardDrainDecision";
 
 type Props = {
   activeWorkspaceId: string | null;
@@ -14,9 +13,6 @@ type Props = {
   queueResumeRequired: boolean;
   onClose: () => void;
   onApplyActionNow: () => Promise<unknown>;
-  onKeepWaiting: () => Promise<unknown>;
-  onInterruptNow: () => Promise<unknown>;
-  onVerifyNow: () => Promise<unknown>;
   onResolve: (resolution: QuotaGuardResolution) => Promise<unknown>;
   onResumeQueuedSends: () => void;
 };
@@ -27,14 +23,12 @@ export function QuotaGuardPanel({
   queueResumeRequired,
   onClose,
   onApplyActionNow,
-  onKeepWaiting,
-  onInterruptNow,
-  onVerifyNow,
   onResolve,
   onResumeQueuedSends,
 }: Props) {
   const breachedWindows = state?.breachedWindows ?? [];
   const affectedTurns = state?.affectedTurns ?? [];
+  const suspendedExternalEngines = state?.suspendedExternalEngines ?? [];
   const activity = state?.activity ?? [];
   const activeAdmission = admissionForWorkspace(state, activeWorkspaceId);
   const workspaceAdmissions = activeWorkspaceId
@@ -75,8 +69,6 @@ export function QuotaGuardPanel({
               <div><dt>Account</dt><dd>{state.accountLabel ?? "Not verified"}</dd></div>
               <div><dt>Observed</dt><dd>{state.snapshotFresh ? "Fresh" : "Stale or unavailable"}</dd></div>
               <div><dt>Breaches</dt><dd>{breachedWindows.join(", ") || "None"}</dd></div>
-              <div><dt>Drain deadline</dt><dd>{formatQuotaGuardTimestamp(state.drainDeadline)}</dd></div>
-              <div><dt>Verification</dt><dd>{formatQuotaGuardTimestamp(state.verifyAt)}</dd></div>
               <div><dt>Monitor</dt><dd>{state.monitorHealthy ? "Healthy" : state.lastError ?? "Needs attention"}</dd></div>
             </dl>
             <div className="settings-field">
@@ -102,10 +94,17 @@ export function QuotaGuardPanel({
                 {affectedTurns.map((turn) => <div key={`${turn.workspaceId}:${turn.threadId}:${turn.turnId}`} className="settings-help">{turn.workspaceId} · {turn.threadId} · {turn.turnId}</div>)}
               </div>
             ) : null}
+            {suspendedExternalEngines.length > 0 ? (
+              <div className="settings-field">
+                <div className="settings-field-label">Suspended external engines ({suspendedExternalEngines.length})</div>
+                {suspendedExternalEngines.map((engine) => (
+                  <div key={`${engine.pid}:${engine.suspendedAt}`} className="settings-help">
+                    {engine.imagePath} Â· PID {engine.pid} Â· since {formatQuotaGuardTimestamp(engine.suspendedAt)}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {controls.applyActionNow ? <button type="button" className="primary" onClick={() => void onApplyActionNow()}>Apply action now</button> : null}
-            {controls.keepWaiting ? <QuotaGuardDrainDecision onKeepWaiting={() => void onKeepWaiting()} onInterruptNow={() => void onInterruptNow()} /> : null}
-            {controls.interruptNow && !controls.keepWaiting ? <button type="button" className="danger" onClick={() => void onInterruptNow()}>Interrupt now</button> : null}
-            {controls.verifyNow ? <button type="button" className="ghost" onClick={() => void onVerifyNow()}>Verify now</button> : null}
             {controls.resolve ? <div className="modal-actions"><button type="button" className="danger" onClick={requestDurableDisable}>Disable guard and open</button><button type="button" className="ghost" onClick={() => void onResolve("retryClosed")}>Keep closed and retry</button></div> : null}
             {canResumeQueue ? <button type="button" className="primary" onClick={onResumeQueuedSends}>Resume queued sends</button> : null}
             <div className="settings-field">

@@ -19,10 +19,8 @@ vi.mock("@/services/events", () => ({
 vi.mock("@/services/tauri", () => ({
   quotaGuardGetState: vi.fn(),
   quotaGuardApplyActionNow: vi.fn(),
-  quotaGuardKeepWaiting: vi.fn(),
-  quotaGuardInterruptNow: vi.fn(),
+  quotaGuardRearm: vi.fn(),
   quotaGuardResolveIntervention: vi.fn(),
-  quotaGuardVerifyNow: vi.fn(),
 }));
 vi.mock("./useQuotaGuardNotificationActions", () => ({
   useQuotaGuardNotificationActions: vi.fn(),
@@ -32,13 +30,11 @@ function quotaState(open: boolean): QuotaGuardPublicState {
   return {
     accountKey: "account",
     accountLabel: "Account",
-    phase: open ? "ready" : "parked",
+    phase: open ? "monitoring" : "tripped",
     snapshot: null,
     snapshotFresh: true,
     breachedWindows: [],
     affectedTurns: [],
-    drainDeadline: null,
-    verifyAt: null,
     monitorHealthy: true,
     lastError: null,
     activity: [],

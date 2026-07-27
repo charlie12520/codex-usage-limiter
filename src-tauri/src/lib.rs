@@ -23,8 +23,8 @@ mod menu;
 mod menu;
 mod notifications;
 mod prompts;
-mod remote_backend;
 mod quota_guard_runtime;
+mod remote_backend;
 mod rules;
 mod settings;
 mod shared;
@@ -60,6 +60,11 @@ fn keep_daemon_running_after_close(app_handle: &tauri::AppHandle) -> bool {
 #[cfg(desktop)]
 async fn stop_managed_daemons_for_exit(app_handle: tauri::AppHandle) {
     let state = app_handle.state::<state::AppState>();
+    quota_guard_runtime::resume_external_engines_for_shutdown(
+        &state.quota_guard,
+        &state.quota_guard_state_path,
+    )
+    .await;
     let _ = tailscale::tailscale_daemon_stop(state).await;
 }
 
@@ -97,6 +102,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(menu::MenuItemRegistry::<tauri::Wry>::default())
         .manage(tray::TrayState::default())
+        .manage(limiter_shell::TrayAppearanceState::default())
         .on_menu_event(menu::handle_menu_event)
         .enable_macos_default_menu(false)
         .menu(menu::build_menu);
@@ -121,7 +127,10 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             notifications::register_windows_toast_identity(
                 &app.config().identifier,
-                app.config().product_name.as_deref().unwrap_or("Codex Usage Limiter"),
+                app.config()
+                    .product_name
+                    .as_deref()
+                    .unwrap_or("Codex Usage Limiter"),
             );
             let state = state::AppState::load(&app.handle());
             app.manage(state);
@@ -189,13 +198,14 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             settings::get_app_settings,
+            settings::get_limiter_boot_screen,
             settings::update_app_settings,
             settings::get_codex_config_path,
             quota_guard_runtime::quota_guard_get_state,
             quota_guard_runtime::quota_guard_apply_action_now,
-            quota_guard_runtime::quota_guard_keep_waiting,
-            quota_guard_runtime::quota_guard_interrupt_now,
             quota_guard_runtime::quota_guard_verify_now,
+            quota_guard_runtime::quota_guard_rearm,
+            quota_guard_runtime::quota_guard_resume,
             quota_guard_runtime::quota_guard_resolve_intervention,
             files::file_read,
             files::file_write,
@@ -206,6 +216,7 @@ pub fn run() {
             tray::set_tray_recent_threads,
             tray::set_tray_session_usage,
             limiter_shell::set_tray_usage_tooltip,
+            limiter_shell::set_tray_theme,
             limiter_shell::get_autostart,
             limiter_shell::set_autostart,
             codex::codex_doctor,

@@ -165,11 +165,7 @@ const baseSettings: AppSettings = {
     enabled: false,
     primaryThresholdPercent: 90,
     secondaryThresholdPercent: 90,
-    action: "notifyOnly",
-    drainTimeoutMinutes: 15,
-    drainTimeoutAction: "notifyAndHold",
-    resetGraceMinutes: 10,
-    notifyWhenAvailable: true,
+    action: "interrupt",
   },
 };
 

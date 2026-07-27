@@ -238,10 +238,8 @@ export type OpenAppTarget = {
 
 export type QuotaAction =
   | "notifyOnly"
-  | "interruptImmediately"
-  | "finishCurrentTurn";
-
-export type DrainTimeoutAction = "notifyAndHold" | "interrupt";
+  | "interrupt"
+  | "block";
 
 export type QuotaGuardSettings = {
   enabled: boolean;
@@ -249,11 +247,9 @@ export type QuotaGuardSettings = {
   armed?: boolean;
   primaryThresholdPercent: number;
   secondaryThresholdPercent: number;
+  /** Percent remaining at which a new usage window automatically rearms. */
+  rearmAfterResetPercentLeft?: number | null;
   action: QuotaAction;
-  drainTimeoutMinutes: number;
-  drainTimeoutAction: DrainTimeoutAction;
-  resetGraceMinutes: number;
-  notifyWhenAvailable: boolean;
 };
 
 export type AppSettings = {

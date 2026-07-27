@@ -13,8 +13,6 @@ describe("QuotaGuardPanel", () => {
       accountLabel: null,
       snapshot: null,
       snapshotFresh: false,
-      drainDeadline: null,
-      verifyAt: null,
       monitorHealthy: false,
       lastError: null,
     } as unknown as QuotaGuardPublicState;
@@ -26,9 +24,6 @@ describe("QuotaGuardPanel", () => {
         queueResumeRequired={false}
         onClose={onClose}
         onApplyActionNow={async () => staleProjection}
-        onKeepWaiting={async () => staleProjection}
-        onInterruptNow={async () => staleProjection}
-        onVerifyNow={async () => staleProjection}
         onResolve={async () => staleProjection}
         onResumeQueuedSends={vi.fn()}
       />,
@@ -37,7 +32,6 @@ describe("QuotaGuardPanel", () => {
     expect(screen.getByRole("dialog", { name: "Quota guard" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close quota guard" }));
     expect(onClose).toHaveBeenCalledOnce();
-    expect(screen.getAllByText("Not scheduled")).toHaveLength(2);
     expect(screen.getByText("workspace · Open · guardDisabled")).toBeTruthy();
   });
 
@@ -45,13 +39,11 @@ describe("QuotaGuardPanel", () => {
     const state = {
       accountKey: "account",
       accountLabel: "Account",
-      phase: "awaitingDrainDecision",
+      phase: "tripped",
       snapshot: null,
       snapshotFresh: true,
       breachedWindows: ["primary"],
       affectedTurns: [],
-      drainDeadline: 0,
-      verifyAt: null,
       monitorHealthy: true,
       lastError: null,
       activity: [],
@@ -71,9 +63,6 @@ describe("QuotaGuardPanel", () => {
         queueResumeRequired
         onClose={vi.fn()}
         onApplyActionNow={async () => state}
-        onKeepWaiting={async () => state}
-        onInterruptNow={async () => state}
-        onVerifyNow={async () => state}
         onResolve={async () => state}
         onResumeQueuedSends={vi.fn()}
       />,
@@ -85,8 +74,6 @@ describe("QuotaGuardPanel", () => {
     expect(screen.getByText("closed · Closed · processClosed")).toBeTruthy();
     expect(screen.getByText("unverified · Closed · epochUnverified")).toBeTruthy();
     expect(screen.getByText("unbound · Closed · workspaceUnbound")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Keep waiting" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Interrupt now" })).toBeTruthy();
   });
 
   it("requests durable disable without opening optimistically and reports Disabled from the backend state", () => {
@@ -98,8 +85,6 @@ describe("QuotaGuardPanel", () => {
       snapshotFresh: false,
       breachedWindows: [],
       affectedTurns: [],
-      drainDeadline: null,
-      verifyAt: null,
       monitorHealthy: false,
       lastError: "Needs reconciliation",
       activity: [],
@@ -112,7 +97,6 @@ describe("QuotaGuardPanel", () => {
       lastError: null,
     } satisfies QuotaGuardPublicState;
     const onResolve = vi.fn(async () => disabled);
-
     const { container, rerender } = render(
       <QuotaGuardPanel
         activeWorkspaceId="workspace"
@@ -120,14 +104,13 @@ describe("QuotaGuardPanel", () => {
         queueResumeRequired={false}
         onClose={vi.fn()}
         onApplyActionNow={async () => intervention}
-        onKeepWaiting={async () => intervention}
-        onInterruptNow={async () => intervention}
-        onVerifyNow={async () => intervention}
         onResolve={onResolve}
         onResumeQueuedSends={vi.fn()}
       />,
     );
     const panel = within(container);
+
+    expect(panel.queryByRole("button", { name: "Rearm" })).toBeNull();
 
     fireEvent.click(panel.getByRole("button", { name: "Disable guard and open" }));
     expect(onResolve).toHaveBeenCalledWith("disableGuard");
@@ -140,9 +123,6 @@ describe("QuotaGuardPanel", () => {
         queueResumeRequired={false}
         onClose={vi.fn()}
         onApplyActionNow={async () => intervention}
-        onKeepWaiting={async () => intervention}
-        onInterruptNow={async () => intervention}
-        onVerifyNow={async () => intervention}
         onResolve={onResolve}
         onResumeQueuedSends={vi.fn()}
       />,
@@ -154,19 +134,17 @@ describe("QuotaGuardPanel", () => {
     rerender(
       <QuotaGuardPanel
         activeWorkspaceId="workspace"
-        state={{ ...intervention, phase: "parked" }}
+        state={{ ...intervention, phase: "tripped" }}
         queueResumeRequired={false}
         onClose={vi.fn()}
         onApplyActionNow={async () => intervention}
-        onKeepWaiting={async () => intervention}
-        onInterruptNow={async () => intervention}
-        onVerifyNow={async () => intervention}
         onResolve={onResolve}
         onResumeQueuedSends={vi.fn()}
       />,
     );
 
-    expect(panel.getByRole("button", { name: "Verify now" })).toBeTruthy();
+    expect(panel.queryByRole("button", { name: "Rearm" })).toBeNull();
+    expect(panel.queryByRole("button", { name: "Verify now" })).toBeNull();
     expect(panel.queryByRole("button", { name: "Disable guard and open" })).toBeNull();
   });
 });

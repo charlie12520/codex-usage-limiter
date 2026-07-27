@@ -6,6 +6,7 @@ import { useQuotaGuardState } from "@/features/quota-guard/hooks/useQuotaGuardSt
 import {
   getAppSettings,
   getAutostart,
+  getLimiterBootScreen,
   listWorkspaces,
   setAutostart,
   setTrayUsageTooltip,
@@ -45,6 +46,7 @@ vi.mock("@/services/tauri", () => ({
   addWorkspace: vi.fn(),
   getAppSettings: vi.fn(),
   getAutostart: vi.fn(),
+  getLimiterBootScreen: vi.fn(),
   listWorkspaces: vi.fn(),
   pickWorkspacePath: vi.fn(),
   setAutostart: vi.fn(),
@@ -59,12 +61,8 @@ const appSettings = {
     primaryThresholdPercent: 90,
     secondaryThresholdPercent: 90,
     action: "notifyOnly",
-    drainTimeoutMinutes: 15,
-    drainTimeoutAction: "interrupt",
-    resetGraceMinutes: 10,
-    notifyWhenAvailable: true,
   },
-} as AppSettings;
+} as unknown as AppSettings;
 
 const workspace = {
   id: "workspace-1",
@@ -88,8 +86,6 @@ const publicState: QuotaGuardPublicState = {
   snapshotFresh: true,
   breachedWindows: [],
   affectedTurns: [],
-  drainDeadline: null,
-  verifyAt: null,
   monitorHealthy: true,
   lastError: null,
   activity: [],
@@ -106,8 +102,10 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.setItem("codex-usage-limiter.windowMode", "compact");
   vi.mocked(getAppSettings).mockResolvedValue(appSettings);
   vi.mocked(getAutostart).mockResolvedValue(false);
+  vi.mocked(getLimiterBootScreen).mockResolvedValue(null);
   vi.mocked(setAutostart).mockResolvedValue(undefined);
   vi.mocked(setTrayUsageTooltip).mockResolvedValue(undefined);
   vi.mocked(listWorkspaces).mockResolvedValue([workspace]);
@@ -116,9 +114,8 @@ beforeEach(() => {
     state: publicState,
     queueResumeRequired: false,
     applyActionNow: vi.fn(),
-    keepWaiting: vi.fn(),
-    interruptNow: vi.fn(),
-    verifyNow: vi.fn(),
+    rearm: vi.fn(),
+    resume: vi.fn(),
     resolveIntervention: vi.fn(),
     resumeQueuedSends: vi.fn(),
     requireQueueResume: vi.fn(),
@@ -126,6 +123,33 @@ beforeEach(() => {
 });
 
 describe("UsageLimiterApp", () => {
+  it("opens the requested valid boot screen once without persisting it", async () => {
+    vi.mocked(getLimiterBootScreen).mockResolvedValue("settings");
+    render(<UsageLimiterApp />);
+
+    await screen.findByRole("heading", { name: "When reached" });
+    expect(document.querySelector("main")?.dataset.screen).toBe("settings");
+    expect(getLimiterBootScreen).toHaveBeenCalledOnce();
+    expect(updateAppSettings).not.toHaveBeenCalled();
+  });
+
+  it("ignores an invalid boot-screen response", async () => {
+    vi.mocked(getLimiterBootScreen).mockResolvedValue("invalid" as never);
+    render(<UsageLimiterApp />);
+
+    await screen.findByRole("heading", { name: "Current usage" });
+    expect(document.querySelector("main")?.dataset.screen).toBe("monitor");
+  });
+
+  it("defaults fresh installs to the pill window", async () => {
+    localStorage.removeItem("codex-usage-limiter.windowMode");
+    render(<UsageLimiterApp />);
+
+    await screen.findByRole("button", { name: "Open settings" });
+    expect(document.querySelector("main")?.dataset.mode).toBe("pill");
+    expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("pill");
+  });
+
   it("projects monitoring, usage, threshold, response, and workspace in the compact dashboard", async () => {
     render(<UsageLimiterApp />);
 
@@ -133,8 +157,15 @@ describe("UsageLimiterApp", () => {
     expect(screen.getByText("Monitoring")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "Current Codex usage" }).getAttribute("aria-valuenow")).toBe("37");
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
-    expect(screen.getByText("Below 10%")).toBeTruthy();
-    expect(screen.getByText("Last checked just now")).toBeTruthy();
+    expect(screen.getByText("At 10%")).toBeTruthy();
+    expect(document.querySelector(".limiter-compact-footer")).toBeNull();
+  });
+
+  it("keeps the compact Connect action when no workspace is attached", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    render(<UsageLimiterApp />);
+
+    expect(await screen.findByRole("button", { name: "Connect" })).toBeTruthy();
   });
 
   it("stages the autostart toggle and applies it on save", async () => {
@@ -168,20 +199,18 @@ describe("UsageLimiterApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(screen.getByText("Codex Usage")).toBeTruthy());
-    expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("mini");
+    await waitFor(() => expect(localStorage.getItem("codex-usage-limiter.windowMode")).toBe("mini"));
   });
 
-  it("stages compact settings and saves response, threshold, and appearance together", async () => {
+  it("stages response and appearance in the rebuilt settings sheet", async () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(screen.getByText("Settings")).toBeTruthy();
+    expect(screen.getByText("Limit", { selector: ".limiter-settings-group" })).toBeTruthy();
+    expect(screen.queryByText("Type a number to turn this on; clear it to turn it off.")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
-      target: { value: "25" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.click(screen.getByRole("button", { name: "Dark" }));
     expect(updateAppSettings).not.toHaveBeenCalled();
 
@@ -189,11 +218,66 @@ describe("UsageLimiterApp", () => {
 
     await waitFor(() => expect(updateAppSettings).toHaveBeenCalledOnce());
     const updated = vi.mocked(updateAppSettings).mock.calls[0]?.[0].quotaGuard;
-    expect(updated.action).toBe("finishCurrentTurn");
-    expect(updated.primaryThresholdPercent).toBe(75);
-    expect(updated.secondaryThresholdPercent).toBe(75);
+    expect(updated.action).toBe("interrupt");
+    expect(updated.primaryThresholdPercent).toBe(90);
+    expect(updated.secondaryThresholdPercent).toBe(90);
     await waitFor(() => expect(document.documentElement.dataset.appearance).toBe("dark"));
     expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy();
+  });
+
+  it("keeps group labels outside their cards and settings controls inside rows", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    const limitGroup = screen.getByText("Limit", { selector: ".limiter-settings-group" });
+    expect(limitGroup.closest("section")).toBeNull();
+    const limitCard = screen.getByRole("heading", { name: "When reached" }).closest(".limiter-settings-card");
+    expect(limitCard?.tagName).toBe("SECTION");
+    expect(screen.getByRole("heading", { name: "When reached" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Block" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText("Send a notification and keep everything running.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Block" }));
+    expect(screen.getByText("Freeze everything and block new sessions until you switch off.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Block" }).className).toContain("is-selected");
+    expect(screen.getByText(/420/)).toBeTruthy();
+    expect(screen.getByText(/320/)).toBeTruthy();
+    expect(screen.getByText(/280/)).toBeTruthy();
+    expect(screen.getByText(/Interrupt and Block freeze every Codex app instantly/)).toBeTruthy();
+  });
+
+  it("renders the rearm field as a spinner-free numeric text input", async () => {
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    const input = screen.getByRole("textbox", {
+      name: "Rearm after reset at % left",
+    }) as HTMLInputElement;
+    expect(input.type).toBe("text");
+    expect(input.inputMode).toBe("numeric");
+    expect(input.getAttribute("type")).toBe("text");
+  });
+
+  it("reflects loaded foreground and login settings in checked switches", async () => {
+    localStorage.setItem("codex-usage-limiter.alwaysOnTop", "true");
+    vi.mocked(getAutostart).mockResolvedValue(true);
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+
+    await waitFor(() => {
+      expect(
+        (screen.getByRole("checkbox", { name: "Keep in foreground" }) as HTMLInputElement)
+          .checked,
+      ).toBe(true);
+      expect(
+        (screen.getByRole("checkbox", { name: "Start at login" }) as HTMLInputElement).checked,
+      ).toBe(true);
+    });
   });
 
   it("disables settings controls while one settings write is pending", async () => {
@@ -206,17 +290,16 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     expect(screen.getByRole("button", { name: "Notify" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Finish turn" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Interrupt" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Save changes" }).hasAttribute("disabled")).toBe(true);
 
     resolveUpdate({
       ...appSettings,
-      quotaGuard: { ...appSettings.quotaGuard, action: "finishCurrentTurn" },
+      quotaGuard: { ...appSettings.quotaGuard, action: "interrupt" },
     });
     await waitFor(() => expect(screen.getByRole("heading", { name: "Current usage" })).toBeTruthy());
   });
@@ -226,15 +309,15 @@ describe("UsageLimiterApp", () => {
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Rearm after reset at % left" }), {
       target: { value: "82" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(updateAppSettings).not.toHaveBeenCalled();
     expect((screen.getByRole("combobox", { name: "When limit is reached" }) as HTMLSelectElement).value).toBe("notifyOnly");
-    expect(screen.getByText("Below 10%")).toBeTruthy();
+    expect(screen.getByText("At 10%")).toBeTruthy();
   });
 
   it("keeps settings open and restores persisted values when save fails", async () => {
@@ -242,13 +325,13 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Finish turn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt" }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("save rejected"));
     expect(screen.getByRole("button", { name: "Notify" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("button", { name: "Finish turn" }).getAttribute("aria-pressed")).toBe("false");
-    expect(screen.getByText("Settings")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Interrupt" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText("Limit", { selector: ".limiter-settings-group" })).toBeTruthy();
   });
 
   it("marks the usage reading as stale when the snapshot is no longer fresh", async () => {
@@ -256,9 +339,8 @@ describe("UsageLimiterApp", () => {
       state: { ...publicState, snapshotFresh: false },
       queueResumeRequired: false,
       applyActionNow: vi.fn(),
-      keepWaiting: vi.fn(),
-      interruptNow: vi.fn(),
-      verifyNow: vi.fn(),
+      rearm: vi.fn(),
+      resume: vi.fn(),
       resolveIntervention: vi.fn(),
       resumeQueuedSends: vi.fn(),
       requireQueueResume: vi.fn(),
@@ -266,20 +348,26 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
-    expect(screen.getByText("Stale reading — refresh for current usage")).toBeTruthy();
+    expect(screen.getByText("Stale reading — waiting for the next update")).toBeTruthy();
     expect(screen.getByText("37%").className).toContain("is-stale");
   });
 
-  it("clamps the staged threshold to at least 1 percent when the field is cleared", async () => {
+  it("clears the rearm setting immediately", async () => {
+    vi.mocked(getAppSettings).mockResolvedValue({
+      ...appSettings,
+      quotaGuard: { ...appSettings.quotaGuard, rearmAfterResetPercentLeft: 40 },
+    });
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
 
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Trigger percentage" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Rearm after reset at % left" }), {
       target: { value: "" },
     });
-
-    expect((screen.getByRole("spinbutton", { name: "Trigger percentage" }) as HTMLInputElement).value).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateAppSettings).toHaveBeenCalledWith(expect.objectContaining({
+      quotaGuard: expect.objectContaining({ rearmAfterResetPercentLeft: null }),
+    })));
   });
 
   it("restores the persisted armed toggle when its immediate update fails", async () => {
@@ -293,7 +381,7 @@ describe("UsageLimiterApp", () => {
     expect((screen.getByRole("checkbox", { name: "Limiter armed" }) as HTMLInputElement).checked).toBe(true);
   });
 
-  it("greys out and locks the threshold grabber while disarmed", async () => {
+  it("greys out the full usage control while keeping the threshold grabber operable when disarmed", async () => {
     vi.mocked(getAppSettings).mockResolvedValue({
       ...appSettings,
       quotaGuard: { ...appSettings.quotaGuard, armed: false },
@@ -301,9 +389,45 @@ describe("UsageLimiterApp", () => {
     render(<UsageLimiterApp />);
     await screen.findByRole("heading", { name: "Current usage" });
 
+    const progress = screen.getByRole("progressbar", { name: "Current Codex usage" });
+    const fill = progress.querySelector(".limiter-progress__fill");
     const handle = screen.getByRole("slider", { name: "Trigger threshold" });
+
+    expect(progress.className).toContain("is-disarmed");
+    expect(fill?.className).toContain("limiter-progress__fill");
     expect(handle.className).toContain("is-disarmed");
-    expect(handle.getAttribute("aria-disabled")).toBe("true");
-    expect(handle.getAttribute("tabindex")).toBe("-1");
+    expect(handle.getAttribute("aria-disabled")).toBe("false");
+    expect(handle.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("persists a threshold drag while disarmed", async () => {
+    vi.mocked(getAppSettings).mockResolvedValue({
+      ...appSettings,
+      quotaGuard: { ...appSettings.quotaGuard, armed: false },
+    });
+    render(<UsageLimiterApp />);
+    await screen.findByRole("heading", { name: "Current usage" });
+
+    const progress = screen.getByRole("progressbar", { name: "Current Codex usage" });
+    Object.defineProperty(progress, "clientWidth", { configurable: true, value: 199 });
+    vi.spyOn(progress, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, bottom: 12, right: 200, width: 200, height: 12, toJSON: () => ({}),
+    });
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(progress.style.getPropertyValue("--threshold-position")).toBe("20px"));
+    const handle = screen.getByRole("slider", { name: "Trigger threshold" });
+    Object.defineProperty(handle, "setPointerCapture", { value: vi.fn() });
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 20 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientX: 50 });
+    fireEvent.pointerUp(handle, { pointerId: 1, clientX: 50 });
+
+    await waitFor(() => expect(updateAppSettings).toHaveBeenCalledWith(expect.objectContaining({
+      quotaGuard: expect.objectContaining({
+        armed: false,
+        primaryThresholdPercent: 75,
+        secondaryThresholdPercent: 75,
+      }),
+    })));
   });
 });
