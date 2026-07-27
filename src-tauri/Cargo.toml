@@ -1,6 +1,6 @@
 [package]
 name = "codex-usage-limiter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Focused Windows desktop usage monitor and response controller for Codex"
 authors = ["Codex Usage Limiter contributors"]
 edition = "2021"
