@@ -54,8 +54,8 @@
           <div class="hero-actions">
             <a
               class="button button-primary"
-              href="https://github.com/charlie12520/codex-usage-limiter/releases/latest"
-            >Download for Windows</a>
+              href="#install"
+            >Install on Windows</a>
             <a
               class="button button-secondary"
               href="https://github.com/charlie12520/codex-usage-limiter"
@@ -186,14 +186,19 @@
       </section>
 
       <section class="install shell section" id="install" aria-labelledby="install-title">
-        <div>
-          <h2 id="install-title">Install the first release.</h2>
+        <div class="install-copy">
+          <h2 id="install-title">Install from PowerShell.</h2>
           <p>Windows 10 or 11. Codex CLI must already be installed and signed in.</p>
         </div>
-        <a
-          class="button button-primary"
-          href="https://github.com/charlie12520/codex-usage-limiter/releases/latest"
-        >Open the release</a>
+        <div class="install-panel">
+          <p class="install-label">PowerShell 5.1+</p>
+          <pre class="install-command"><code>irm https://raw.githubusercontent.com/<wbr>charlie12520/<wbr>codex-usage-limiter/<wbr>main/<wbr>install.ps1 | iex</code></pre>
+          <p class="install-note">Downloads the latest per-user installer and verifies its GitHub-published SHA-256 digest before opening it. No administrator rights required.</p>
+          <a
+            class="button button-secondary"
+            href="https://github.com/charlie12520/codex-usage-limiter/releases/latest"
+          >Manual downloads</a>
+        </div>
       </section>
     </main>
 
