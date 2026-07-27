@@ -56,11 +56,11 @@ jobs:
         shell: pwsh
         run: |
           $files = @(Get-Item codex-usage-limiter-*-windows-x64.zip; Get-Item codex-usage-limiter-*-windows-x64-setup.exe) | ForEach-Object { $_.FullName }
-          gh release upload "$env:GITHUB_REF_NAME" @files --clobber 2>$null
+          gh release view "$env:GITHUB_REF_NAME" *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create "$env:GITHUB_REF_NAME" --title "Codex Usage Limiter $env:GITHUB_REF_NAME" --generate-notes 2>$null
-            gh release upload "$env:GITHUB_REF_NAME" @files --clobber
+            gh release create "$env:GITHUB_REF_NAME" --title "Codex Usage Limiter $env:GITHUB_REF_NAME" --generate-notes --draft 2>$null
           }
+          gh release upload "$env:GITHUB_REF_NAME" @files --clobber
 
   macos:
     runs-on: macos-latest
@@ -99,10 +99,10 @@ jobs:
         run: |
           set -euo pipefail
           dmg=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -n 1)
-          if ! gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber; then
-            gh release create "$GITHUB_REF_NAME" --title "Codex Usage Limiter $GITHUB_REF_NAME" --generate-notes || true
-            gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "Codex Usage Limiter $GITHUB_REF_NAME" --generate-notes --draft || true
           fi
+          gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber
 
   linux:
     runs-on: ubuntu-latest
@@ -147,8 +147,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          files=$(ls src-tauri/target/release/bundle/appimage/*.AppImage src-tauri/target/release/bundle/deb/*.deb)
-          if ! gh release upload "$GITHUB_REF_NAME" $files --clobber; then
-            gh release create "$GITHUB_REF_NAME" --title "Codex Usage Limiter $GITHUB_REF_NAME" --generate-notes || true
-            gh release upload "$GITHUB_REF_NAME" $files --clobber
+          files=(
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+          )
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "Codex Usage Limiter $GITHUB_REF_NAME" --generate-notes --draft || true
           fi
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
