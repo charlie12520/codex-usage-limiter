@@ -2,9 +2,11 @@
 
 Codex Usage Limiter is an unofficial Windows desktop utility that watches the signed-in Codex account's rate limits and applies a chosen response when your remaining quota reaches or drops below a floor you set.
 
-[Product page](https://charlie12520.github.io/codex-usage-limiter/) · [Latest release](../../releases/latest) · [▶ Watch the launch film](https://github.com/charlie12520/codex-usage-limiter/releases/download/v0.1.1/codex-usage-limiter-launch.mp4)
+[Product page](https://charlie12520.github.io/codex-usage-limiter/) · [Latest release](../../releases/latest)
 
-**[▶ Launch film (55s)](https://github.com/charlie12520/codex-usage-limiter/releases/download/v0.1.1/codex-usage-limiter-launch.mp4)** — the whole loop: set the floor, arm it, and watch what each of the three responses actually does when your quota reaches it. Notify lets the run finish and the quota keep draining; Interrupt cuts the run off at the floor and switches itself off; Block cuts it off too, stays armed, and refuses the next run.
+https://github.com/user-attachments/assets/7bdad663-f289-44e5-bd0c-e3035184be82
+
+The whole loop in 55 seconds: set the floor, arm it, and watch what each of the three responses does when your quota reaches it. Notify lets the run finish and the quota keep draining; Interrupt cuts the run off at the floor and switches itself off; Block cuts it off too, stays armed, and refuses the next run.
 
 ## Install on Windows
 
